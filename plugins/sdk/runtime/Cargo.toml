@@ -1,0 +1,22 @@
+[package]
+name = "hydra-script-guest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+[workspace]
+[lib]
+crate-type = ["cdylib"]
+[features]
+python = ["dep:rustpython-vm"]
+javascript = ["dep:boa_engine"]
+[dependencies]
+hya-plugin-sdk = { path = "../../../crates/hydra-plugin-sdk" }
+serde_json = "1"
+serde = "1"
+boa_engine = { version = "=0.20.0", optional = true }
+rustpython-vm = { version = "=0.6.0", default-features = false, features = ["compiler", "serde"], optional = true }
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
