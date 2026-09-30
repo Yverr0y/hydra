@@ -1,0 +1,42 @@
+[package]
+name = "hya-plugin"
+version = "0.1.0"
+edition.workspace = true
+readme = "README.md"
+publish = true
+# MIT OR Apache-2.0 like hya-core and hya-net. Never depend on hya-cli,
+# hya-gui, hya-host or hya-updater. See LICENSING.md.
+license.workspace = true
+repository.workspace = true
+include = ["src/**", "build.rs", "Cargo.toml", "README.md", "product-version.txt", "tests/**"]
+homepage.workspace = true
+description = "Plugin host for the hydra download manager: wasm runtime, policy, packages, manager"
+
+[dependencies]
+tempfile = "3"
+fs2 = "0.4"
+semver = "1"
+hya-plugin-api = { version = "0.1.0", path = "../hydra-plugin-api" }
+hya-net = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+minisign-verify = "0.3.0"
+toml = "1.1.6"
+url = "2.5.8"
+idna = "1.1.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+wasmi = "2.0.0"
+
+[build-dependencies]
+toml = "1.1.6"
+
+[dev-dependencies]
+wat = "1.261.0"
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
