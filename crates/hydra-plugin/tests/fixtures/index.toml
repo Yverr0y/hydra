@@ -1,0 +1,9 @@
+schema=1
+name='Test publisher'
+[[plugins]]
+id='example.direct'
+name='Direct'
+version='1.2.0'
+package='https://example.com/direct.hyaplugin'
+sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+api=1
