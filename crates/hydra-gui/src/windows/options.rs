@@ -412,7 +412,7 @@ impl std::fmt::Display for UaPreset {
 
 const UA_PRESETS: &[UaPreset] = &[
     UaPreset {
-        label: "Default (Mozilla/5.0)",
+        label: "Default (IE 11)",
         value: crate::model::DEFAULT_USER_AGENT,
     },
     UaPreset {
@@ -2157,7 +2157,7 @@ mod tests {
         assert_eq!(ua_preset(chrome.value), Some(*chrome));
         assert_eq!(
             ua_preset(crate::model::DEFAULT_USER_AGENT).map(|p| p.label),
-            Some("Default (Mozilla/5.0)")
+            Some("Default (IE 11)")
         );
     }
 

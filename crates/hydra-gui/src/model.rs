@@ -1139,11 +1139,8 @@ pub struct Settings {
 }
 
 /// The User-Agent a download added by hand sends unless Options picks another.
-///
-/// Deliberately not a `hydra` token: WAF scanner lists match that name, since
-/// it is also a password cracker's, and NCBI answers 403 to any agent
-/// containing it.
-pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0";
+pub const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 6.1; Trident/7.0; rv:11.0) like Gecko";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -1813,11 +1810,11 @@ fn migrate_theme_mode(s: &mut Settings) {
     s.dark_mode = None;
 }
 
-/// Move a config off the old `hydra-gui/<version>` default, which every save
-/// wrote out in full and which the servers described at
-/// [`DEFAULT_USER_AGENT`] refuse. Any other value is the user's own choice.
+/// Move a config off the legacy "Mozilla/5.0" default or an older
+/// `hydra-gui/<version>` to the current version. Any other value is the user's
+/// own choice.
 fn migrate_user_agent(s: &mut Settings) {
-    if s.user_agent.starts_with("hydra-gui/") {
+    if s.user_agent == "Mozilla/5.0" || s.user_agent.starts_with("hydra-gui/") {
         s.user_agent = DEFAULT_USER_AGENT.into();
     }
 }
@@ -2354,10 +2351,12 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_hydra_gui_agent_moves_to_the_new_default() {
-        let mut old: Settings = toml::from_str(r#"user_agent = "hydra-gui/0.9.3""#).unwrap();
-        migrate_user_agent(&mut old);
-        assert_eq!(old.user_agent, DEFAULT_USER_AGENT);
+    fn a_saved_legacy_agent_moves_to_the_new_default() {
+        for old in ["hydra-gui/0.9.3", "hydra-gui/1.0.3", "Mozilla/5.0"] {
+            let mut s: Settings = toml::from_str(&format!(r#"user_agent = "{old}""#)).unwrap();
+            migrate_user_agent(&mut s);
+            assert_eq!(s.user_agent, DEFAULT_USER_AGENT);
+        }
     }
 
     #[test]
@@ -2378,6 +2377,7 @@ mod tests {
             .user_agent
             .to_ascii_lowercase()
             .contains("hydra"));
+        assert_eq!(Settings::default().user_agent, DEFAULT_USER_AGENT);
     }
 
     #[test]
