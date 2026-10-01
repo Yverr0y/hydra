@@ -1,0 +1,9 @@
+id = "example.direct"
+name = "Direct link reference"
+version = "0.1.0"
+api = 1
+module = "plugin.wasm"
+hooks = ["resolve", "refresh", "check"]
+claims = ["https://example.com/*"]
+[permissions]
+sources = ["example.com"]
