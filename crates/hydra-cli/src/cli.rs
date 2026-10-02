@@ -184,6 +184,8 @@ fn parse_seconds(s: &str) -> Result<f64, String> {
 /// Container for a downloaded stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Container {
+    Mkv,
+    Webm,
     /// MP4, remuxed through ffmpeg when the segments are MPEG-TS.
     Mp4,
     /// The assembled MPEG transport stream, no ffmpeg needed.
@@ -194,6 +196,8 @@ impl Container {
     pub fn as_str(self) -> &'static str {
         match self {
             Container::Mp4 => "mp4",
+            Container::Mkv => "mkv",
+            Container::Webm => "webm",
             Container::Ts => "ts",
         }
     }
@@ -431,6 +435,33 @@ pub struct Cli {
     /// across them.
     #[arg(value_name = "URL")]
     pub urls: Vec<String>,
+    /// Bypass installed resolver plugins.
+    #[arg(long)]
+    pub no_plugins: bool,
+    /// Use only this installed plugin.
+    #[arg(long, conflicts_with = "no_plugins")]
+    pub plugin: Option<String>,
+    /// Print the resolved track list without downloading.
+    #[arg(long)]
+    pub list_tracks: bool,
+    /// Audio selection: best, none, or a track ID.
+    #[arg(long, default_value = "best")]
+    pub audio: String,
+    /// Download audio only from plugin media plans.
+    #[arg(long)]
+    pub extract_audio: bool,
+    /// Convert extracted audio through ffmpeg.
+    #[arg(long, requires = "extract_audio", value_parser = ["mp3", "m4a", "opus", "flac", "wav"])]
+    pub audio_format: Option<String>,
+    /// Use flags and defaults without interactive plugin track selection.
+    #[arg(long)]
+    pub no_input: bool,
+    /// Subtitle languages to download as sidecars.
+    #[arg(long, value_delimiter = ',')]
+    pub subs: Vec<String>,
+    /// Explicit plugin track IDs.
+    #[arg(long = "track", value_delimiter = ',')]
+    pub tracks: Vec<String>,
 
     /// Preferred rendition height for an HLS/DASH stream, e.g. `--quality 720`.
     ///
@@ -1113,6 +1144,11 @@ pub enum ParityCmd {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
+    /// Manage resolver plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: crate::plugins::Command,
+    },
     /// Full-screen download manager with a queue.
     ///
     /// Its options are declared HERE rather than borrowed from the top level: a
@@ -1527,7 +1563,7 @@ mod tests {
             vec!["hydra", "--limit-rate", "0", "http://x/f"],
             vec!["hydra", "--timeout", "nope", "http://x/f"],
             vec!["hydra", "--timeout", "-1", "http://x/f"],
-            vec!["hydra", "--container", "mkv", "http://x/f"],
+            vec!["hydra", "--container", "invalid", "http://x/f"],
             vec!["hydra", "--max-filesize", "big", "http://x/f"],
             vec!["hydra", "--json", "--stdout", "http://x/f"],
             vec!["hydra", "--password", "pw", "http://x/f"],
