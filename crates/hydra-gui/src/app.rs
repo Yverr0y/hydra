@@ -2233,7 +2233,15 @@ impl App {
         match self.win_of(kind) {
             Some(id) => {
                 let (w, h) = self.window_size(kind);
-                window::resize(id, iced::Size::new(w, h))
+                let resize = window::resize(id, iced::Size::new(w, h));
+                if matches!(kind, WinKind::Progress(_)) {
+                    Task::batch([
+                        window::set_min_size(id, Some(iced::Size::new(w, h))),
+                        resize,
+                    ])
+                } else {
+                    resize
+                }
             }
             None => Task::none(),
         }
@@ -2715,7 +2723,7 @@ impl App {
                     .get(&id)
                     .map(|p| p.details)
                     .unwrap_or(self.cfg.settings.show_conn_details);
-                (680.0, if details { 582.0 } else { 352.0 })
+                crate::windows::progress::standard_size(details)
             }
             WinKind::Complete(_) => (crate::windows::complete::width(), 180.0),
             WinKind::Options => (760.0, 700.0),
@@ -2823,8 +2831,11 @@ impl App {
             // stays proportional to the display. Unlike `size`, iced passes
             // a minimum straight to winit, so this one is in OS points and
             // does carry the scale.
-            min_size: (kind == WinKind::Main)
-                .then(|| iced::Size::new(main_min_w() * scale, MAIN_MIN_H * scale)),
+            min_size: match kind {
+                WinKind::Main => Some(iced::Size::new(main_min_w() * scale, MAIN_MIN_H * scale)),
+                WinKind::Progress(_) => Some(iced::Size::new(os_w, os_h)),
+                _ => None,
+            },
             resizable,
             minimizable,
             position,
@@ -7552,7 +7563,15 @@ impl App {
                     .filter(|(_, k)| **k != WinKind::Main)
                     .map(|(id, kind)| {
                         let (w, h) = self.window_size(*kind);
-                        window::resize(*id, iced::Size::new(w, h))
+                        let resize = window::resize(*id, iced::Size::new(w, h));
+                        if matches!(kind, WinKind::Progress(_)) {
+                            Task::batch([
+                                window::set_min_size(*id, Some(iced::Size::new(w, h))),
+                                resize,
+                            ])
+                        } else {
+                            resize
+                        }
                     })
                     .collect();
                 // The main window keeps its size but not its floor, which was
@@ -9993,6 +10012,34 @@ mod tests {
         assert_eq!(
             fit_to_display((760.0, 700.0), iced::Size::ZERO, 1.0),
             (760.0, 700.0)
+        );
+    }
+
+    #[test]
+    fn progress_dialog_window_size_matches_detail_toggle() {
+        let mut app = App::default();
+        let dl = 1;
+        assert_eq!(
+            app.window_size(WinKind::Progress(dl)),
+            crate::windows::progress::standard_size(app.cfg.settings.show_conn_details)
+        );
+
+        app.prog.entry(dl).or_default().details = true;
+        assert_eq!(
+            app.window_size(WinKind::Progress(dl)),
+            (
+                crate::windows::progress::WIDTH,
+                crate::windows::progress::HEIGHT_DETAILS,
+            )
+        );
+
+        app.prog.entry(dl).or_default().details = false;
+        assert_eq!(
+            app.window_size(WinKind::Progress(dl)),
+            (
+                crate::windows::progress::WIDTH,
+                crate::windows::progress::HEIGHT_COLLAPSED,
+            )
         );
     }
 

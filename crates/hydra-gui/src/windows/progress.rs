@@ -22,6 +22,21 @@ fn tab_btn<'a>(label: String, selected: bool, msg: Message) -> El<'a> {
         .into()
 }
 
+pub const WIDTH: f32 = 680.0;
+pub const HEIGHT_DETAILS: f32 = 582.0;
+pub const HEIGHT_COLLAPSED: f32 = 352.0;
+
+pub fn standard_size(details: bool) -> (f32, f32) {
+    (
+        WIDTH,
+        if details {
+            HEIGHT_DETAILS
+        } else {
+            HEIGHT_COLLAPSED
+        },
+    )
+}
+
 /// The narrowest the status rows' key column is drawn; it grows to the
 /// widest key the locale produced (see `crate::windows::label_column`).
 const KEY_W: f32 = 130.0;
@@ -717,5 +732,11 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn standard_size_matches_details_mode() {
+        assert_eq!(standard_size(true), (WIDTH, HEIGHT_DETAILS));
+        assert_eq!(standard_size(false), (WIDTH, HEIGHT_COLLAPSED));
     }
 }
