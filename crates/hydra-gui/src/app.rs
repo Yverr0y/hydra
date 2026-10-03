@@ -6,8 +6,8 @@
 use crate::engine::{self, Cmd, StartSpec};
 use crate::model::{
     self, categorize, CategoryDef, Column, ColumnPref, ConfigFile, DlId, DlQuota, DlState,
-    DownloadItem, PowerAction, ProxyChoice, ProxyMode, ProxyPick, Settings, SiteLogin, StateFile,
-    ThemeMode,
+    DownloadItem, PowerAction, ProxyChoice, ProxyMode, ProxyPick, Settings, SiteLogin, SortKey,
+    StateFile, ThemeMode,
 };
 use crate::picker::{self, Ask};
 use crate::sounds;
@@ -110,7 +110,9 @@ pub enum MenuAction {
     /// View > Hide toolbar text: toolbar icons keep their labels or trade
     /// them for hover tooltips.
     HideToolbarText,
-    ArrangeBy(Column),
+    ArrangeBy(SortKey),
+    /// Set ascending (`true`) or descending (`false`) sort direction.
+    SortDirection(bool),
     /// View > Columns, and the header menu's own entry: the manage dialog.
     ManageColumns,
     /// Header menu: show or hide one column, or move it left (`true`).
@@ -181,6 +183,13 @@ impl MenuAction {
             MenuAction::HideCategories => "hide_cats".into(),
             MenuAction::HideToolbarText => "hide_toolbar_text".into(),
             MenuAction::ArrangeBy(k) => format!("arrange:{}", k.id()),
+            MenuAction::SortDirection(asc) => {
+                if *asc {
+                    "sort_dir:asc".into()
+                } else {
+                    "sort_dir:desc".into()
+                }
+            }
             MenuAction::ManageColumns => "columns".into(),
             MenuAction::ToggleColumn(c) => format!("col_show:{}", c.id()),
             MenuAction::MoveColumn(c, left) => {
@@ -220,8 +229,14 @@ impl MenuAction {
         }
         if let Some(k) = id.strip_prefix("arrange:") {
             return Some(MenuAction::ArrangeBy(
-                Column::from_id(k).unwrap_or(Column::Name),
+                SortKey::from_id(k).unwrap_or(SortKey::Column(Column::Name)),
             ));
+        }
+        if id == "sort_dir:asc" {
+            return Some(MenuAction::SortDirection(true));
+        }
+        if id == "sort_dir:desc" {
+            return Some(MenuAction::SortDirection(false));
         }
         if let Some(c) = id.strip_prefix("col_show:").and_then(Column::from_id) {
             return Some(MenuAction::ToggleColumn(c));
@@ -1278,7 +1293,8 @@ pub enum Message {
     HeaderPress(Column),
     /// Right press on a header cell: opens the column menu over it.
     HeaderRightClick(Column),
-    SortBy(Column),
+    SortBy(SortKey),
+    SortDirection(bool),
     /// Show or hide one column, from the header menu or the manage dialog.
     ColToggle(Column),
     /// Move one column one place towards the given side. `true` is left.
@@ -1614,7 +1630,7 @@ pub struct App {
     /// the pair is timed here instead, as the download table already does
     /// with [`Self::last_click`].
     pub last_queue_click: Option<(String, Instant)>,
-    pub sort: (Column, bool),
+    pub sort: (SortKey, bool),
     pub add_url: AddUrlState,
     pub file_info: FileInfoState,
     pub zip_preview: ZipPreviewState,
@@ -1885,7 +1901,7 @@ impl Default for App {
             ctx_at: None,
             last_click: None,
             last_queue_click: None,
-            sort: (Column::LastTry, false),
+            sort: (SortKey::Column(Column::LastTry), false),
             add_url: AddUrlState::default(),
             file_info: FileInfoState::default(),
             zip_preview: ZipPreviewState::default(),
@@ -2154,6 +2170,7 @@ impl App {
             },
             speed_limiter: self.cfg.settings.speed_limiter_on,
             speed_profile: self.cfg.settings.active_profile(),
+            sort: self.sort,
         }
     }
 
@@ -2272,10 +2289,20 @@ impl App {
         // on every rebuild — two allocations per *comparison* put O(n log n)
         // of them on the pointer's event rate during a drag.
         match key {
-            Column::Name => sort_keyed(&mut v, asc, |d| d.file_name.to_lowercase()),
-            Column::Status => sort_keyed(&mut v, asc, DownloadItem::status_text),
-            _ => v.sort_by(|a, b| {
-                let ord = match key {
+            SortKey::Column(Column::Name) => {
+                sort_keyed(&mut v, asc, |d| d.file_name.to_lowercase())
+            }
+            SortKey::Column(Column::Status) => sort_keyed(&mut v, asc, DownloadItem::status_text),
+            SortKey::OrderOfAddition => v.sort_by(|a, b| {
+                let ord = a.added.cmp(&b.added).then_with(|| a.id.cmp(&b.id));
+                if asc {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }),
+            SortKey::Column(col) => v.sort_by(|a, b| {
+                let ord = match col {
                     Column::Queue => a.queue.cmp(&b.queue).then(a.q_order.cmp(&b.q_order)),
                     Column::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
                     Column::TimeLeft => a
@@ -2286,10 +2313,15 @@ impl App {
                         .rate
                         .partial_cmp(&b.rate)
                         .unwrap_or(std::cmp::Ordering::Equal),
-                    Column::LastTry => a.last_try.cmp(&b.last_try),
+                    Column::LastTry => {
+                        let ta = a.last_try.unwrap_or(a.added);
+                        let tb = b.last_try.unwrap_or(b.added);
+                        ta.cmp(&tb)
+                    }
                     Column::Description => a.description.cmp(&b.description),
                     Column::Name | Column::Status => std::cmp::Ordering::Equal,
                 };
+                let ord = ord.then_with(|| a.id.cmp(&b.id));
                 if asc {
                     ord
                 } else {
@@ -3423,7 +3455,7 @@ impl App {
             error: None,
             resume: None,
             added: fmt::now_unix(),
-            last_try: None,
+            last_try: Some(fmt::now_unix()),
             queue,
             q_order,
             auth,
@@ -4982,15 +5014,7 @@ impl App {
                     // Dock hidden the app sat in Accessory, which has no
                     // menu bar to install into.
                     crate::macos_dock::sync(self.cfg.settings.hide_from_taskbar, true);
-                    let state = crate::macos_menu::MenuState {
-                        theme_mode: self.cfg.settings.theme(),
-                        show_categories: self.cfg.settings.show_categories,
-                        show_toolbar_labels: self.cfg.settings.show_toolbar_labels,
-                        ui_scale_pct: self.cfg.settings.ui_scale_pct,
-                        language: self.cfg.language.clone().unwrap_or_else(|| "en".into()),
-                        speed_limiter: self.cfg.settings.speed_limiter_on,
-                        speed_profile: self.cfg.settings.active_profile(),
-                    };
+                    let state = self.native_menu_state();
                     let queues: Vec<String> =
                         self.cfg.queues.iter().map(|q| q.name.clone()).collect();
                     crate::macos_menu::install(
@@ -5720,7 +5744,7 @@ impl App {
                     if moved {
                         self.save_config();
                     } else {
-                        return self.update(Message::SortBy(col));
+                        return self.update(Message::SortBy(col.into()));
                     }
                 }
                 if self.sch.drag.take().is_some() {
@@ -5746,6 +5770,12 @@ impl App {
                 } else {
                     self.sort = (key, true);
                 }
+                self.sync_native_menu();
+                Task::none()
+            }
+            Message::SortDirection(asc) => {
+                self.sort.1 = asc;
+                self.sync_native_menu();
                 Task::none()
             }
             Message::ToolbarResume => {
@@ -7479,6 +7509,7 @@ impl App {
                 Task::none()
             }
             MenuAction::ArrangeBy(key) => self.update(Message::SortBy(key)),
+            MenuAction::SortDirection(asc) => self.update(Message::SortDirection(asc)),
             MenuAction::ManageColumns => self.open_window(WinKind::Columns),
             MenuAction::ToggleColumn(col) => self.update(Message::ColToggle(col)),
             MenuAction::MoveColumn(col, left) => {
@@ -12106,5 +12137,77 @@ mod tests {
         let old = app.sch.queue.clone();
         assert!(app.rename_queue(&old, "Night"));
         assert_eq!(app.sch.queue, "Night");
+    }
+
+    #[test]
+    fn sort_by_order_of_addition_sorts_by_added_and_id() {
+        let mut app = App::default();
+        let mut d1 = item(1, "/d", "a.zip", None, DlState::Paused);
+        d1.added = 100;
+        let mut d2 = item(2, "/d", "b.zip", None, DlState::Paused);
+        d2.added = 200;
+        let mut d3 = item(3, "/d", "c.zip", None, DlState::Paused);
+        d3.added = 200;
+        let mut d4 = item(4, "/d", "d.zip", None, DlState::Paused);
+        d4.added = 300;
+        app.state.downloads = vec![d3, d1, d4, d2];
+
+        app.sort = (SortKey::OrderOfAddition, true);
+        assert_eq!(app.visible_ids(), vec![1, 2, 3, 4]);
+
+        app.sort = (SortKey::OrderOfAddition, false);
+        assert_eq!(app.visible_ids(), vec![4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn sort_by_last_try_date_handles_untried_and_reverses_cleanly() {
+        let mut app = App::default();
+        let mut d1 = item(1, "/d", "a.zip", None, DlState::Paused);
+        d1.added = 100;
+        d1.last_try = None;
+
+        let mut d2 = item(2, "/d", "b.zip", None, DlState::Paused);
+        d2.added = 150;
+        d2.last_try = Some(300);
+
+        let mut d3 = item(3, "/d", "c.zip", None, DlState::Paused);
+        d3.added = 200;
+        d3.last_try = None;
+
+        let mut d4 = item(4, "/d", "d.zip", None, DlState::Paused);
+        d4.added = 250;
+        d4.last_try = Some(260);
+
+        app.state.downloads = vec![d3, d1, d4, d2];
+
+        // Descending (Z-A / newest first):
+        // d2 (300) > d4 (260) > d3 (fallback added 200) > d1 (fallback added 100)
+        app.sort = (SortKey::Column(Column::LastTry), false);
+        assert_eq!(app.visible_ids(), vec![2, 4, 3, 1]);
+
+        // Ascending (A-Z / oldest first):
+        app.sort = (SortKey::Column(Column::LastTry), true);
+        assert_eq!(app.visible_ids(), vec![1, 3, 4, 2]);
+    }
+
+    #[test]
+    fn sort_key_and_menu_action_id_round_trip() {
+        assert_eq!(
+            SortKey::from_id(SortKey::OrderOfAddition.id()),
+            Some(SortKey::OrderOfAddition)
+        );
+        assert_eq!(SortKey::from_id("Addition"), Some(SortKey::OrderOfAddition));
+        assert_eq!(
+            MenuAction::from_id(&MenuAction::ArrangeBy(SortKey::OrderOfAddition).id()),
+            Some(MenuAction::ArrangeBy(SortKey::OrderOfAddition))
+        );
+        assert_eq!(
+            MenuAction::from_id(&MenuAction::SortDirection(true).id()),
+            Some(MenuAction::SortDirection(true))
+        );
+        assert_eq!(
+            MenuAction::from_id(&MenuAction::SortDirection(false).id()),
+            Some(MenuAction::SortDirection(false))
+        );
     }
 }

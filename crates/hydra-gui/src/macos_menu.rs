@@ -13,7 +13,7 @@
 
 use crate::app::MenuAction;
 use crate::i18n::tr;
-use crate::model::Column;
+use crate::model::{Column, SortKey};
 use std::cell::RefCell;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
@@ -28,6 +28,7 @@ pub struct MenuState {
     pub speed_limiter: bool,
     /// Index of the ticked speed profile, if the cap in force matches one.
     pub speed_profile: Option<usize>,
+    pub sort: (SortKey, bool),
 }
 
 /// The installed menu, plus the check items whose tick has to track the
@@ -40,6 +41,9 @@ struct Installed {
     hide_toolbar_text: CheckMenuItem,
     speed_limiter: CheckMenuItem,
     speed_profiles: Vec<CheckMenuItem>,
+    sort_items: Vec<(SortKey, CheckMenuItem)>,
+    sort_az: CheckMenuItem,
+    sort_za: CheckMenuItem,
     themes: Vec<(crate::model::ThemeMode, CheckMenuItem)>,
     scales: Vec<(u16, CheckMenuItem)>,
     languages: Vec<(String, CheckMenuItem)>,
@@ -202,10 +206,26 @@ pub fn reinstall(
     let _ = view.append(&hide_toolbar_text);
     let _ = view.append(&item("Columns", MenuAction::ManageColumns));
     let arrange = Submenu::new(tr("Arrange files"), true);
+    let mut sort_items = Vec::new();
     // Q holds an icon, not a value a reader can arrange by.
-    for key in Column::ALL.into_iter().filter(|c| *c != Column::Queue) {
-        let _ = arrange.append(&item(key.label(), MenuAction::ArrangeBy(key)));
+    for col in Column::ALL.into_iter().filter(|c| *c != Column::Queue) {
+        let key = SortKey::Column(col);
+        let it = check(col.label(), MenuAction::ArrangeBy(key), state.sort.0 == key);
+        let _ = arrange.append(&it);
+        sort_items.push((key, it));
     }
+    let add_it = check(
+        "By order of addition",
+        MenuAction::ArrangeBy(SortKey::OrderOfAddition),
+        state.sort.0 == SortKey::OrderOfAddition,
+    );
+    let _ = arrange.append(&add_it);
+    sort_items.push((SortKey::OrderOfAddition, add_it));
+    let _ = arrange.append(&PredefinedMenuItem::separator());
+    let sort_az = check("A-Z", MenuAction::SortDirection(true), state.sort.1);
+    let _ = arrange.append(&sort_az);
+    let sort_za = check("Z-A", MenuAction::SortDirection(false), !state.sort.1);
+    let _ = arrange.append(&sort_za);
     let _ = view.append(&arrange);
     let theme_m = Submenu::new(tr("Theme"), true);
     let mut themes = Vec::new();
@@ -267,6 +287,9 @@ pub fn reinstall(
             hide_toolbar_text,
             speed_limiter,
             speed_profiles,
+            sort_items,
+            sort_az,
+            sort_za,
             themes,
             scales,
             languages: langs,
@@ -300,6 +323,11 @@ pub fn sync(state: &MenuState) -> bool {
         for (i, item) in installed.speed_profiles.iter().enumerate() {
             item.set_checked(state.speed_profile == Some(i));
         }
+        for (key, item) in &installed.sort_items {
+            item.set_checked(*key == state.sort.0);
+        }
+        installed.sort_az.set_checked(state.sort.1);
+        installed.sort_za.set_checked(!state.sort.1);
         for (mode, item) in &installed.themes {
             item.set_checked(*mode == state.theme_mode);
         }
