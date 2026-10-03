@@ -2014,15 +2014,12 @@ impl App {
         }
     }
 
-    /// Move a download's finished file, or give it another name,
+    /// Move a download's file or partial staging file, or give it another name,
     /// and keep the row pointing at where it went.
     ///
-    /// Only a finished file moves. A transfer still running owns its `.part`
-    /// and hands the engine a destination at completion time, so moving the
-    /// file out from under it would strand both halves — and there is
-    /// nothing at the destination yet to move. The new name is pinned
-    /// (`name_locked`), or a later probe would hand the server's name back
-    /// and undo the rename.
+    /// An active transfer owns its open `.part` file and cannot be moved;
+    /// stopped, paused or completed transfers can. The new name is pinned
+    /// (`name_locked`) so later server probes do not undo it.
     ///
     /// `owner` is the window that asked: the complete dialog is often up while
     /// the main window is hidden in the tray, and a sheet cannot hang off that.
@@ -2030,12 +2027,12 @@ impl App {
         let Some(d) = self.item(id) else {
             return Task::none();
         };
-        if d.state != DlState::Complete || !d.full_path().is_file() {
+        if d.state.is_active() {
             return Task::none();
         }
-        // The native panel asks about overwriting on its own, which is why
-        // the save picker is the right one here rather than a folder picker
-        // plus a name box: moving and renaming are one gesture in it.
+        if d.state == DlState::Complete && !d.full_path().is_file() {
+            return Task::none();
+        }
         let ask = Ask {
             file_name: Some(d.file_name.clone()),
             ..Ask::in_dir(&d.save_dir)
@@ -2045,25 +2042,65 @@ impl App {
 
     /// Carry out the move the "Move/Rename..." panel asked for.
     fn move_rename_to(&mut self, id: DlId, to: std::path::PathBuf) -> Task<Message> {
-        let Some(from) = self.item(id).map(|d| d.full_path()) else {
+        let Some(d) = self.item(id) else {
             return Task::none();
         };
+        if d.state.is_active() {
+            return Task::none();
+        }
+        let from = d.full_path();
         if to == from {
             return Task::none();
         }
-        if let Err(e) = crate::files::move_file(&from, &to) {
-            crate::log::warn(&format!("move {} -> {}: {e}", from.display(), to.display()));
-            return self.ask(ConfirmKind::MoveFailed(e.to_string()));
-        }
+        let is_complete = d.state == DlState::Complete;
+        let from_part = d.part_file();
         let dir = to.parent().map(|p| p.to_string_lossy().into_owned());
-        let name = to.file_name().map(|n| n.to_string_lossy().into_owned());
+        let raw_name = to.file_name().map(|n| n.to_string_lossy().into_owned());
+        let name = raw_name
+            .as_deref()
+            .and_then(hya_net::filename::portable)
+            .or(raw_name);
+        let to_part = dir
+            .as_deref()
+            .zip(name.as_deref())
+            .map(|(dir, name)| std::path::Path::new(dir).join(format!("{name}.part")));
+
+        if is_complete {
+            if let Err(e) = crate::files::move_file(&from, &to) {
+                crate::log::warn(&format!("move {} -> {}: {e}", from.display(), to.display()));
+                return self.ask(ConfirmKind::MoveFailed(e.to_string()));
+            }
+        } else if from_part.exists() {
+            if let Some(to_part_path) = &to_part {
+                if let Err(e) = crate::files::move_file(&from_part, to_part_path) {
+                    crate::log::warn(&format!(
+                        "move {} -> {}: {e}",
+                        from_part.display(),
+                        to_part_path.display()
+                    ));
+                    return self.ask(ConfirmKind::MoveFailed(e.to_string()));
+                }
+                move_stream_companions(&from_part, to_part_path);
+            }
+        } else if from.exists() {
+            if let Err(e) = crate::files::move_file(&from, &to) {
+                crate::log::warn(&format!("move {} -> {}: {e}", from.display(), to.display()));
+                return self.ask(ConfirmKind::MoveFailed(e.to_string()));
+            }
+        }
+
         if let Some(d) = self.item_mut(id) {
             if let Some(dir) = dir {
                 d.save_dir = dir;
             }
             if let Some(name) = name {
-                d.file_name = name;
+                d.set_file_name(&name);
                 d.name_locked = true;
+            }
+            if !is_complete {
+                if let Some(tp) = to_part {
+                    d.part_path = Some(tp.to_string_lossy().into_owned());
+                }
             }
         }
         self.save_state();
@@ -8209,6 +8246,33 @@ fn may_adopt_name(d: &DownloadItem) -> bool {
     !d.name_locked && d.downloaded == 0 && d.held.is_empty()
 }
 
+fn move_stream_companions(from_part: &std::path::Path, to_part: &std::path::Path) {
+    let Some(parent) = from_part.parent() else {
+        return;
+    };
+    let Some(from_prefix) = from_part.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Some(to_prefix) = to_part.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let prefix_with_dot = format!("{from_prefix}.");
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(suffix) = fname.strip_prefix(&prefix_with_dot) {
+                    let companion_dest = to_part.with_file_name(format!("{to_prefix}.{suffix}"));
+                    let _ = crate::files::move_file(&path, &companion_dest);
+                }
+            }
+        }
+    }
+}
+
 /// Make the name of a download with nothing on disk yet portable.
 ///
 /// A list saved before every name went through `set_file_name` can hold one
@@ -9419,11 +9483,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Only a finished file on disk may be moved: the panel is not even
-    /// offered for a transfer that still owns its `.part`, or for a file that
-    /// is no longer where the row says.
+    /// Active transfers cannot be moved: the panel is not offered for a
+    /// transfer that is actively running, or for a complete file that is
+    /// no longer where the row says.
     #[test]
-    fn move_rename_is_not_offered_for_a_file_that_is_not_finished_on_disk() {
+    fn move_rename_is_not_offered_for_active_or_missing_files() {
         let dir = std::env::temp_dir().join(format!("hydra-mv-gate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let dir_s = dir.to_string_lossy().into_owned();
@@ -9432,8 +9496,11 @@ mod tests {
         let missing = item(7, &dir_s, "deleted.iso", None, DlState::Complete);
         let finished = item(8, &dir_s, "done.iso", None, DlState::Complete);
         std::fs::write(finished.full_path(), b"bytes").expect("file on disk");
+        let paused = item(10, &dir_s, "stopped.iso", None, DlState::Paused);
         let mut app = App::default();
-        app.state.downloads.extend([running, missing, finished]);
+        app.state
+            .downloads
+            .extend([running, missing, finished, paused]);
 
         assert_eq!(app.update(Message::MoveRename(6)).units(), 0);
         assert_eq!(app.update(Message::MoveRename(7)).units(), 0);
@@ -9441,6 +9508,10 @@ mod tests {
         assert!(
             app.update(Message::MoveRename(8)).units() > 0,
             "the panel opens"
+        );
+        assert!(
+            app.update(Message::MoveRename(10)).units() > 0,
+            "the panel opens for paused transfer"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9466,6 +9537,132 @@ mod tests {
         assert_eq!(move_rename(&mut app).units(), 0);
         app.selected = vec![9];
         assert!(move_rename(&mut app).units() > 0, "the panel opens");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn move_rename_context_entry_enabled_for_inactive_downloads() {
+        let mut app = App::default();
+        let d = item(1, "/tmp", "test.bin", None, DlState::Receiving);
+        app.state.downloads.push(d);
+        app.selected = vec![1];
+
+        let entries = crate::ui::menu::context_entries(&app);
+        let mv = entries
+            .iter()
+            .find(|e| e.action == Some(MenuAction::MoveRenameSel))
+            .expect("move/rename entry");
+        assert!(!mv.enabled);
+
+        app.state.downloads[0].state = DlState::Paused;
+        let entries = crate::ui::menu::context_entries(&app);
+        let mv = entries
+            .iter()
+            .find(|e| e.action == Some(MenuAction::MoveRenameSel))
+            .expect("move/rename entry");
+        assert!(mv.enabled);
+
+        app.state.downloads[0].state = DlState::Complete;
+        let entries = crate::ui::menu::context_entries(&app);
+        let mv = entries
+            .iter()
+            .find(|e| e.action == Some(MenuAction::MoveRenameSel))
+            .expect("move/rename entry");
+        assert!(mv.enabled);
+    }
+
+    #[test]
+    fn a_paused_download_with_part_file_is_moved_and_renamed() {
+        let dir = std::env::temp_dir().join(format!("hydra-mv-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = item(
+            11,
+            &dir.to_string_lossy(),
+            "partial.bin",
+            None,
+            DlState::Paused,
+        );
+        let from_part = d.part_file();
+        std::fs::write(&from_part, b"40percentbytes").expect("part file");
+        let mut app = App::default();
+        app.state.downloads.push(d);
+        let to = dir.join("dest").join("renamed.bin");
+
+        let _ = app.update(Message::MoveRenameTo(11, to.clone()));
+
+        let to_part = dir.join("dest").join("renamed.bin.part");
+        assert!(to_part.is_file());
+        assert_eq!(std::fs::read(&to_part).unwrap(), b"40percentbytes");
+        assert!(!from_part.exists());
+        let d = app.item(11).expect("still listed");
+        assert_eq!(d.full_path(), to);
+        assert_eq!(d.part_file(), to_part);
+        assert_eq!(
+            d.part_path.as_deref(),
+            Some(to_part.to_string_lossy().as_ref())
+        );
+        assert!(d.name_locked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_paused_stream_download_moves_all_companion_files() {
+        let dir = std::env::temp_dir().join(format!("hydra-mv-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = item(
+            12,
+            &dir.to_string_lossy(),
+            "clip.mp4",
+            None,
+            DlState::Paused,
+        );
+        let from_part = d.part_file();
+        std::fs::write(&from_part, b"stream-part").expect("part");
+        let t0 = from_part.with_file_name("clip.mp4.part.t0");
+        let t0_ck = from_part.with_file_name("clip.mp4.part.t0.ck");
+        std::fs::write(&t0, b"track0").expect("t0");
+        std::fs::write(&t0_ck, b"checkpoint0").expect("t0_ck");
+
+        let mut app = App::default();
+        app.state.downloads.push(d);
+        let to = dir.join("streams").join("new-clip.mp4");
+
+        let _ = app.update(Message::MoveRenameTo(12, to.clone()));
+
+        let to_part = dir.join("streams").join("new-clip.mp4.part");
+        let new_t0 = dir.join("streams").join("new-clip.mp4.part.t0");
+        let new_t0_ck = dir.join("streams").join("new-clip.mp4.part.t0.ck");
+
+        assert!(to_part.is_file());
+        assert!(new_t0.is_file());
+        assert!(new_t0_ck.is_file());
+        assert!(!from_part.exists());
+        assert!(!t0.exists());
+        assert!(!t0_ck.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unstarted_download_without_part_file_updates_metadata_on_move() {
+        let dir = std::env::temp_dir().join(format!("hydra-mv-unstarted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = item(
+            13,
+            &dir.to_string_lossy(),
+            "pending.zip",
+            None,
+            DlState::Queued,
+        );
+        let mut app = App::default();
+        app.state.downloads.push(d);
+        let to = dir.join("queue").join("renamed-pending.zip");
+
+        let _ = app.update(Message::MoveRenameTo(13, to.clone()));
+
+        let d = app.item(13).expect("still listed");
+        assert_eq!(d.full_path(), to);
+        assert_eq!(d.file_name, "renamed-pending.zip");
+        assert!(d.name_locked);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

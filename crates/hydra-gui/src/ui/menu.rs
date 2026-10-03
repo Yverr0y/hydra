@@ -338,10 +338,8 @@ pub fn context_entries(app: &App) -> Vec<Entry> {
         v.push(Entry::item(tr("Open with..."), MenuAction::OpenWithSel));
     }
     v.push(Entry::item(tr("Open folder"), MenuAction::OpenFolderSel));
-    // Only a finished file has somewhere to be moved from; see
-    // `App::move_rename_selected`.
     v.push(Entry {
-        enabled: done,
+        enabled: !d.state.is_active(),
         ..Entry::item(tr("Move/Rename..."), MenuAction::MoveRenameSel)
     });
     v.push(Entry {
