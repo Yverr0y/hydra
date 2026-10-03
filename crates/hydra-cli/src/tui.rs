@@ -67,6 +67,15 @@ pub enum Command {
     /// Return to the list.
     CloseDetail,
     Add(String),
+    PluginLoad,
+    PluginToggle(String, bool),
+    PluginMove(String, isize),
+    PluginInstall(String),
+    PluginConfirm,
+    PluginSettings(String),
+    PluginPermission(String, String),
+    FormSubmit,
+    FormCancel,
     None,
 }
 
@@ -85,6 +94,11 @@ pub enum Mode {
     /// Per-connection detail for one queue item.
     Detail,
     Help,
+    Plugins,
+    PluginPath(String),
+    PluginConsent,
+    PluginGrant(String, String),
+    Form,
 }
 
 pub struct Ui {
@@ -95,6 +109,10 @@ pub struct Ui {
     pub selected: usize,
     pub mode: Mode,
     pub log: EventLog,
+    pub plugins: Vec<hya_plugin::manager::Installed>,
+    pub plugin_selected: usize,
+    pub plugin_review: Option<(std::path::PathBuf, hya_plugin_api::Manifest)>,
+    pub plugin_prompt: Option<crate::plugin_ui::Prompt>,
     /// Sparkline of aggregate rate.
     history: Vec<f64>,
 }
@@ -114,6 +132,10 @@ impl Ui {
             mode: Mode::List,
             log: EventLog::new(256),
             history: Vec::new(),
+            plugins: Vec::new(),
+            plugin_selected: 0,
+            plugin_review: None,
+            plugin_prompt: None,
         }
     }
 
@@ -127,6 +149,132 @@ impl Ui {
             return Command::Quit;
         }
         match &mut self.mode {
+            Mode::Form => {
+                let Some(prompt) = &mut self.plugin_prompt else {
+                    self.mode = Mode::List;
+                    return Command::None;
+                };
+                match k.code {
+                    KeyCode::Esc => Command::FormCancel,
+                    KeyCode::Enter => Command::FormSubmit,
+                    KeyCode::Tab | KeyCode::Down => {
+                        prompt.selected = (prompt.selected + 1) % prompt.form.fields.len().max(1);
+                        Command::None
+                    }
+                    KeyCode::Up => {
+                        prompt.selected = prompt.selected.saturating_sub(1);
+                        Command::None
+                    }
+                    KeyCode::Char(c) => {
+                        if let Some(field) = prompt.form.fields.get(prompt.selected) {
+                            prompt.values.entry(field.key.clone()).or_default().push(c);
+                        }
+                        Command::None
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(field) = prompt.form.fields.get(prompt.selected) {
+                            prompt.values.entry(field.key.clone()).or_default().pop();
+                        }
+                        Command::None
+                    }
+                    _ => Command::None,
+                }
+            }
+            Mode::PluginGrant(id, capability) => match k.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Plugins;
+                    Command::None
+                }
+                KeyCode::Enter => {
+                    let operation = Command::PluginPermission(id.clone(), capability.clone());
+                    self.mode = Mode::Plugins;
+                    operation
+                }
+                KeyCode::Char(c) => {
+                    capability.push(c);
+                    Command::None
+                }
+                KeyCode::Backspace => {
+                    capability.pop();
+                    Command::None
+                }
+                _ => Command::None,
+            },
+            Mode::PluginConsent => match k.code {
+                KeyCode::Char('y') => Command::PluginConfirm,
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.mode = Mode::Plugins;
+                    self.plugin_review = None;
+                    Command::None
+                }
+                _ => Command::None,
+            },
+            Mode::PluginPath(path) => match k.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Plugins;
+                    Command::None
+                }
+                KeyCode::Enter => {
+                    let path = path.clone();
+                    self.mode = Mode::Plugins;
+                    Command::PluginInstall(path)
+                }
+                KeyCode::Char(c) => {
+                    path.push(c);
+                    Command::None
+                }
+                KeyCode::Backspace => {
+                    path.pop();
+                    Command::None
+                }
+                _ => Command::None,
+            },
+            Mode::Plugins => match k.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::List;
+                    Command::None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.plugin_selected =
+                        (self.plugin_selected + 1).min(self.plugins.len().saturating_sub(1));
+                    Command::None
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.plugin_selected = self.plugin_selected.saturating_sub(1);
+                    Command::None
+                }
+                KeyCode::Char('s') => self
+                    .plugins
+                    .get(self.plugin_selected)
+                    .map(|p| Command::PluginSettings(p.manifest.id.clone()))
+                    .unwrap_or(Command::None),
+                KeyCode::Char('g') => {
+                    if let Some(p) = self.plugins.get(self.plugin_selected) {
+                        self.mode = Mode::PluginGrant(p.manifest.id.clone(), String::new());
+                    }
+                    Command::None
+                }
+                KeyCode::Char('e') => self
+                    .plugins
+                    .get(self.plugin_selected)
+                    .map(|p| Command::PluginToggle(p.manifest.id.clone(), !p.enabled))
+                    .unwrap_or(Command::None),
+                KeyCode::Char('J') | KeyCode::Char('K') => self
+                    .plugins
+                    .get(self.plugin_selected)
+                    .map(|p| {
+                        Command::PluginMove(
+                            p.manifest.id.clone(),
+                            if k.code == KeyCode::Char('J') { 1 } else { -1 },
+                        )
+                    })
+                    .unwrap_or(Command::None),
+                KeyCode::Char('i') => {
+                    self.mode = Mode::PluginPath(String::new());
+                    Command::None
+                }
+                _ => Command::None,
+            },
             Mode::Adding(buf) => match k.code {
                 KeyCode::Esc => {
                     self.mode = Mode::List;
@@ -182,6 +330,10 @@ impl Ui {
                     // Esc is NOT a quit key here: it is the "go back" key everywhere
                     // else in this UI, and making it also mean "cancel all downloads"
                     // is how someone loses a transfer by reflex.
+                    KeyCode::Char('P') => {
+                        self.mode = Mode::Plugins;
+                        Command::PluginLoad
+                    }
                     KeyCode::Char('q') => Command::Quit,
                     KeyCode::Char('b') => Command::Background,
                     KeyCode::Enter => sel.map(Command::OpenDetail).unwrap_or(Command::None),
@@ -472,7 +624,7 @@ impl Ui {
                 let _ = writeln!(
                     s,
                     "\r\n  \x1b[90mEnter\x1b[0m detail  \x1b[90ma\x1b[0m add  \x1b[90mp\x1b[0m pause  \
-                     \x1b[90mr\x1b[0m resume  \x1b[90md\x1b[0m cancel  \x1b[90mJ/K\x1b[0m reorder  \
+                     \x1b[90mP\x1b[0m plugins  \x1b[90mr\x1b[0m resume  \x1b[90md\x1b[0m cancel  \x1b[90mJ/K\x1b[0m reorder  \
                      \x1b[90mc\x1b[0m clear  \x1b[90m+/-\x1b[0m parallel jobs  \x1b[90m?\x1b[0m help  \
                      \x1b[90mb\x1b[0m background  \x1b[90mq\x1b[0m quit\r"
                 );
@@ -600,6 +752,7 @@ pub async fn run_headless(
     max_active: usize,
     template: &crate::download::Job,
 ) -> io::Result<usize> {
+    let _headless = crate::plugin_ui::Headless::enter();
     let mut q = load_queue(&queue_path, initial, max_active)?;
     eprintln!(
         "hydra: no terminal; running the queue headless ({} items)",
@@ -787,6 +940,8 @@ async fn run_interactive(
     let mut q = load_queue(&queue_path, initial, max_active)?;
 
     let _guard = TerminalGuard::enter()?;
+    let (_plugin_guard, plugin_events) = crate::plugin_ui::attach();
+    let mut pending_prompts = std::collections::VecDeque::new();
     let mut ui = Ui::new();
     // Live progress from running transfers. Unbounded because dropping a tick is
     // harmless (the next one supersedes it) but blocking a transfer to deliver one is
@@ -863,11 +1018,189 @@ async fn run_interactive(
             }
         }
 
+        while let Ok(event) = plugin_events.try_recv() {
+            match event {
+                crate::plugin_ui::Event::Prompt(prompt) => pending_prompts.push_back(prompt),
+                crate::plugin_ui::Event::Log(line) => ui.log.push(crate::plugin_ui::clean(&line)),
+                crate::plugin_ui::Event::Installed(result) => match result {
+                    Ok(plugins) => ui.plugins = plugins,
+                    Err(e) => ui.log.push(e),
+                },
+            }
+        }
+        if ui.plugin_prompt.is_none() {
+            if let Some(prompt) = pending_prompts.pop_front() {
+                ui.plugin_prompt = Some(prompt);
+                ui.mode = Mode::Form;
+            }
+        }
         // ---- input ----
         if event::poll(Duration::from_millis(120))? {
             if let Event::Key(k) = event::read()? {
                 match ui.on_key(k, &q) {
                     Command::Quit => break,
+                    Command::FormCancel | Command::FormSubmit => {
+                        let submit = k.code == KeyCode::Enter;
+                        if let Some(prompt) = &mut ui.plugin_prompt {
+                            let result = if submit {
+                                prompt.submit()
+                            } else {
+                                Err(hya_plugin_api::PluginError::new(
+                                    hya_plugin_api::ErrorCode::Cancelled,
+                                    "prompt cancelled",
+                                ))
+                            };
+                            if submit && result.is_err() {
+                                prompt.error = result.err().map(|e| e.to_string());
+                            } else {
+                                let _ = prompt.reply.send(result);
+                                ui.plugin_prompt = None;
+                                ui.mode = Mode::List;
+                            }
+                        }
+                    }
+                    Command::PluginInstall(path) => {
+                        match hya_plugin::manager::Manager::inspect(std::path::Path::new(&path)) {
+                            Ok(package) => {
+                                ui.plugin_review = Some((path.into(), package.manifest));
+                                ui.mode = Mode::PluginConsent;
+                            }
+                            Err(e) => ui.log.push(e.to_string()),
+                        }
+                    }
+                    Command::PluginSettings(id) => {
+                        if let Some(plugin) =
+                            ui.plugins.iter().find(|p| p.manifest.id == id).cloned()
+                        {
+                            let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+                            let fields = plugin
+                                .manifest
+                                .settings
+                                .iter()
+                                .map(|field| {
+                                    let mut field = field.clone();
+                                    field.default =
+                                        plugin.settings.get(&field.key).cloned().or(field.default);
+                                    field
+                                })
+                                .collect();
+                            ui.plugin_prompt = Some(crate::plugin_ui::Prompt {
+                                plugin: id.clone(),
+                                form: hya_plugin_api::Form {
+                                    title: Some("Settings".into()),
+                                    fields,
+                                },
+                                values: Default::default(),
+                                selected: 0,
+                                error: None,
+                                reply,
+                            });
+                            ui.mode = Mode::Form;
+                            tokio::task::spawn_blocking(move || {
+                                let result = (|| -> Result<_, String> {
+                                    let values = receiver
+                                        .recv()
+                                        .map_err(|e| e.to_string())?
+                                        .map_err(|e| e.to_string())?;
+                                    let mut manager = hya_plugin::manager::Manager::open(
+                                        hya_plugin::hydra_dir().join("plugins"),
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    for (key, value) in values {
+                                        if plugin.manifest.settings.iter().any(|f| {
+                                            f.key == key
+                                                && f.kind == hya_plugin_api::FieldKind::Secret
+                                        }) {
+                                            let secret = value.as_text().unwrap_or_default();
+                                            if !secret.is_empty() {
+                                                manager
+                                                    .set_secret(&id, &key, secret.into())
+                                                    .map_err(|e| e.to_string())?;
+                                            }
+                                        } else {
+                                            manager
+                                                .set(&id, &key, value)
+                                                .map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                    manager
+                                        .check(
+                                            &id,
+                                            hya_net::tls::TlsCapableConnector::new()
+                                                .map_err(|e| e.to_string())?,
+                                            crate::plugins::frontend(&id),
+                                        )
+                                        .map_err(|e| e.to_string())?;
+                                    Ok(manager.list().to_vec())
+                                })();
+                                crate::plugin_ui::send(crate::plugin_ui::Event::Installed(result));
+                            });
+                        }
+                    }
+                    operation @ (Command::PluginLoad
+                    | Command::PluginToggle(..)
+                    | Command::PluginMove(..)
+                    | Command::PluginConfirm
+                    | Command::PluginPermission(..)) => {
+                        let review = ui.plugin_review.take();
+                        ui.mode = Mode::Plugins;
+                        tokio::task::spawn_blocking(move || {
+                            let result = (|| -> Result<_, String> {
+                                let mut manager = hya_plugin::manager::Manager::open(
+                                    hya_plugin::hydra_dir().join("plugins"),
+                                )
+                                .map_err(|e| e.to_string())?;
+                                match operation {
+                                    Command::PluginPermission(id, capability) => {
+                                        let (grant, capability) = capability
+                                            .strip_prefix('-')
+                                            .map(|s| (false, s))
+                                            .unwrap_or((
+                                                true,
+                                                capability.strip_prefix('+').unwrap_or(&capability),
+                                            ));
+                                        manager
+                                            .permission(&id, capability, grant)
+                                            .map_err(|e| e.to_string())?;
+                                    }
+                                    Command::PluginToggle(id, enabled) => {
+                                        manager.enable(&id, enabled).map_err(|e| e.to_string())?
+                                    }
+                                    Command::PluginMove(id, delta) => {
+                                        let mut ids: Vec<_> = manager
+                                            .list()
+                                            .iter()
+                                            .map(|p| p.manifest.id.clone())
+                                            .collect();
+                                        if let Some(index) = ids.iter().position(|p| p == &id) {
+                                            let next = index
+                                                .saturating_add_signed(delta)
+                                                .min(ids.len() - 1);
+                                            ids.swap(index, next);
+                                            manager.order(&ids).map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                    Command::PluginConfirm => {
+                                        if let Some((path, manifest)) = review {
+                                            if hya_plugin::manager::Manager::inspect(&path)
+                                                .map_err(|e| e.to_string())?
+                                                .manifest
+                                                != manifest
+                                            {
+                                                return Err("package changed; review again".into());
+                                            }
+                                            manager
+                                                .install(&path, manifest.permissions)
+                                                .map_err(|e| e.to_string())?;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                Ok(manager.list().to_vec())
+                            })();
+                            crate::plugin_ui::send(crate::plugin_ui::Event::Installed(result));
+                        });
+                    }
                     Command::Pause(id) => {
                         q.pause(id);
                         if let Some(stop) = stops.remove(&id) {
@@ -969,6 +1302,63 @@ async fn run_interactive(
         // per-connection table needs the full width, and a split view at 80 columns
         // truncates both halves into uselessness.
         let frame = match (&ui.mode, ui.detail) {
+            (Mode::Form, _) => format!(
+                "\x1b[2J\x1b[H{}",
+                ui.plugin_prompt
+                    .as_ref()
+                    .map(|p| p.render())
+                    .unwrap_or_default()
+            ),
+            (
+                Mode::Plugins | Mode::PluginPath(_) | Mode::PluginConsent | Mode::PluginGrant(..),
+                _,
+            ) => {
+                let mut text = "\x1b[2J\x1b[HPlugins\r\n\r\n".to_string();
+                for (index, p) in ui.plugins.iter().enumerate() {
+                    text.push_str(&format!(
+                        "{} [{}] {} | {} | {} | {}{}\r\n",
+                        if index == ui.plugin_selected {
+                            ">"
+                        } else {
+                            " "
+                        },
+                        if p.enabled { "x" } else { " " },
+                        crate::plugin_ui::clean(&p.manifest.name),
+                        crate::plugin_ui::clean(&p.manifest.id),
+                        crate::plugin_ui::clean(p.manifest.author.as_deref().unwrap_or("—")),
+                        crate::plugin_ui::clean(&p.manifest.version),
+                        if p.dev { " (dev)" } else { "" }
+                    ));
+                }
+                if let Mode::PluginGrant(id, capability) = &ui.mode {
+                    if let Some(plugin) = ui.plugins.iter().find(|p| &p.manifest.id == id) {
+                        text.push_str(&format!(
+                            "\r\nDeclared: {}\r\n",
+                            crate::plugin_ui::clean(
+                                &hya_plugin::consent(&plugin.manifest.permissions).join(" | ")
+                            )
+                        ));
+                    }
+                    text.push_str(&format!("\r\nCapability (+ grant, - revoke): {}\r\nUse http:HOST, sources:HOST, cookies:HOST, exec:PROGRAM or data\r\nEnter apply · Esc cancel",crate::plugin_ui::clean(capability)));
+                } else if let Mode::PluginPath(path) = &ui.mode {
+                    text.push_str(&format!(
+                        "\r\nInstall path: {}\r\nEnter review · Esc cancel",
+                        crate::plugin_ui::clean(path)
+                    ));
+                } else if let Some((_, manifest)) = &ui.plugin_review {
+                    text.push_str(&format!(
+                        "\r\n{} ({})\r\n{}\r\ny accept and install · n cancel",
+                        crate::plugin_ui::clean(&manifest.name),
+                        crate::plugin_ui::clean(&manifest.id),
+                        crate::plugin_ui::clean(
+                            &hya_plugin::consent(&manifest.permissions).join(" | ")
+                        )
+                    ));
+                } else {
+                    text.push_str("\r\ne enable/disable · s settings · g grants · i install · J/K order · Esc back\r\n");
+                }
+                text
+            }
             (Mode::Detail, Some(id)) => ui.render_detail(&q, id, cols, rows),
             _ => ui.render(&q, cols, rows),
         };
@@ -1059,6 +1449,99 @@ mod tests {
         q
     }
 
+    #[test]
+    fn plugin_navigation_settings_permissions_and_consent_bindings() {
+        let mut ui = Ui::new();
+        let q = q2();
+        assert!(matches!(ui.on_key(key('P'), &q), Command::PluginLoad));
+        assert_eq!(ui.mode, Mode::Plugins);
+        assert!(matches!(ui.on_key(key('s'), &q), Command::None));
+        let manifest: hya_plugin_api::Manifest = serde_json::from_value(serde_json::json!({"id":"example.direct","name":"Direct","version":"1.0.0","api":1,"module":"plugin.wasm"})).unwrap();
+        ui.plugins.push(hya_plugin::manager::Installed {
+            grants: manifest.permissions.clone(),
+            manifest,
+            directory: "unused".into(),
+            dev: false,
+            signing: Default::default(),
+            enabled: true,
+            pins: Default::default(),
+            settings: Default::default(),
+            failures: 0,
+            module_sha256: String::new(),
+            previous: None,
+        });
+        assert!(
+            matches!(ui.on_key(key('s'),&q),Command::PluginSettings(id) if id == "example.direct")
+        );
+        assert!(matches!(
+            ui.on_key(key('e'), &q),
+            Command::PluginToggle(_, false)
+        ));
+        assert!(matches!(ui.on_key(key('J'), &q), Command::PluginMove(_, 1)));
+        assert!(matches!(
+            ui.on_key(key('K'), &q),
+            Command::PluginMove(_, -1)
+        ));
+        ui.on_key(key('j'), &q);
+        assert_eq!(ui.plugin_selected, 0);
+        ui.on_key(key('k'), &q);
+        ui.on_key(key('g'), &q);
+        for c in "+datax".chars() {
+            ui.on_key(key(c), &q);
+        }
+        ui.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &q);
+        assert!(
+            matches!(ui.on_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE),&q),Command::PluginPermission(_,cap) if cap == "+data")
+        );
+        ui.on_key(key('i'), &q);
+        for c in "test.hyaplugin".chars() {
+            ui.on_key(key(c), &q);
+        }
+        assert!(
+            matches!(ui.on_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE),&q),Command::PluginInstall(path) if path == "test.hyaplugin")
+        );
+        ui.mode = Mode::PluginConsent;
+        assert!(matches!(ui.on_key(key('y'), &q), Command::PluginConfirm));
+        ui.on_key(key('n'), &q);
+        assert_eq!(ui.mode, Mode::Plugins);
+        ui.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &q);
+        assert_eq!(ui.mode, Mode::List);
+    }
+    #[test]
+    fn plugin_form_edits_fields_without_leaking_secret_and_maps_cancel() {
+        let mut ui = Ui::new();
+        let q = q2();
+        let (reply, _) = std::sync::mpsc::sync_channel(1);
+        let form=serde_json::from_value(serde_json::json!({"fields":[{"key":"secret","label":"Token","type":"secret"},{"key":"count","label":"Count","type":"number"}]})).unwrap();
+        ui.plugin_prompt = Some(crate::plugin_ui::Prompt {
+            plugin: "example.direct".into(),
+            form,
+            values: Default::default(),
+            selected: 0,
+            error: None,
+            reply,
+        });
+        ui.mode = Mode::Form;
+        for c in "privatex".chars() {
+            ui.on_key(key(c), &q);
+        }
+        ui.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &q);
+        ui.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &q);
+        ui.on_key(key('2'), &q);
+        ui.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &q);
+        let prompt = ui.plugin_prompt.as_ref().unwrap();
+        assert_eq!(prompt.selected, 0);
+        assert!(!prompt.render().contains("private"));
+        assert!(prompt.submit().is_ok());
+        assert!(matches!(
+            ui.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &q),
+            Command::FormSubmit
+        ));
+        assert!(matches!(
+            ui.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &q),
+            Command::FormCancel
+        ));
+    }
     #[test]
     fn navigation_stays_in_bounds() {
         let mut ui = Ui::new();
