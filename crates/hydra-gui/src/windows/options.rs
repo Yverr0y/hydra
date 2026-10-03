@@ -1711,7 +1711,10 @@ const GROUPS: &[(&str, &[OptTab])] = &[
             OptTab::Sites,
         ],
     ),
-    ("Extensions", &[OptTab::Extensions, OptTab::MediaTools]),
+    (
+        "Extensions & Plugins",
+        &[OptTab::Extensions, OptTab::MediaTools, OptTab::Plugins],
+    ),
 ];
 
 /// The sub-tab label for one page.
@@ -1733,6 +1736,7 @@ fn leaf_label(t: OptTab) -> &'static str {
         OptTab::Sites => "Sites Logins",
         OptTab::Extensions => "Browser extensions",
         OptTab::MediaTools => "Media tools",
+        OptTab::Plugins => "Plugins",
     }
 }
 
@@ -1797,6 +1801,7 @@ pub fn view(app: &App) -> El<'_> {
         OptTab::Sites => sites(app),
         OptTab::Extensions => extensions(app),
         OptTab::MediaTools => media_tools(app),
+        OptTab::Plugins => crate::plugins::view(app),
         OptTab::Sounds => sounds(app),
     };
 
@@ -1875,6 +1880,7 @@ mod tests {
             OptTab::Extensions,
             OptTab::MediaTools,
             OptTab::Sounds,
+            OptTab::Plugins,
         ];
         for page in ALL {
             let holding: Vec<&str> = GROUPS
@@ -1898,7 +1904,7 @@ mod tests {
         assert_eq!(group_of(OptTab::SaveTo).0, "Files");
         assert_eq!(group_of(OptTab::Proxy).0, "Connection");
         assert_eq!(group_of(OptTab::Quota).0, "Connection");
-        assert_eq!(group_of(OptTab::Extensions).0, "Extensions");
+        assert_eq!(group_of(OptTab::Extensions).0, "Extensions & Plugins");
     }
 
     /// Opening a group lands on its first page, and re-selecting the group you
@@ -2099,6 +2105,7 @@ mod tests {
                     OptTab::Sites => sites(&app),
                     OptTab::Extensions => extensions(&app),
                     OptTab::MediaTools => media_tools(&app),
+                    OptTab::Plugins => crate::plugins::view(&app),
                     OptTab::Sounds => sounds(&app),
                 };
             }
