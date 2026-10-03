@@ -472,7 +472,11 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
         icon: dim_text(theme),
         placeholder: c(TEXT_DIM),
         value: text_color(theme),
-        selection: c(SELECT_BG),
+        selection: if dark {
+            c(SELECT_BG_DARK)
+        } else {
+            c(SELECT_BG)
+        },
     }
 }
 
@@ -501,12 +505,17 @@ pub fn input_frame(theme: &Theme) -> container::Style {
 
 /// A text editor with no frame of its own, for use inside [`input_frame`].
 pub fn editor_bare(theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    let dark = is_dark(theme);
     text_editor::Style {
         background: Background::Color(Color::TRANSPARENT),
         border: Border::default(),
         placeholder: c(TEXT_DIM),
         value: text_color(theme),
-        selection: c(SELECT_BG),
+        selection: if dark {
+            c(SELECT_BG_DARK)
+        } else {
+            c(SELECT_BG)
+        },
     }
 }
 
@@ -654,5 +663,23 @@ mod tests {
         for pct in SCALE_STEPS {
             assert_eq!(nearest_scale(pct), pct, "{pct}% is already a step");
         }
+    }
+
+    #[test]
+    fn text_selection_contrasts_with_theme() {
+        let light_input = input(&Theme::Light, text_input::Status::Active);
+        let dark_input = input(&Theme::Dark, text_input::Status::Active);
+        assert_eq!(light_input.selection, c(SELECT_BG));
+        assert_eq!(dark_input.selection, c(SELECT_BG_DARK));
+
+        let light_editor = editor_bare(&Theme::Light, text_editor::Status::Active);
+        let dark_editor = editor_bare(&Theme::Dark, text_editor::Status::Active);
+        assert_eq!(light_editor.selection, c(SELECT_BG));
+        assert_eq!(dark_editor.selection, c(SELECT_BG_DARK));
+
+        let light_invalid = input_invalid(&Theme::Light, text_input::Status::Active);
+        let dark_invalid = input_invalid(&Theme::Dark, text_input::Status::Active);
+        assert_eq!(light_invalid.selection, c(SELECT_BG));
+        assert_eq!(dark_invalid.selection, c(SELECT_BG_DARK));
     }
 }
