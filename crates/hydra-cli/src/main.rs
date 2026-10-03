@@ -38,6 +38,9 @@ mod completions;
 mod cookies;
 mod download;
 mod metalink;
+mod plan;
+mod plugin_ui;
+mod plugins;
 mod preview;
 mod progress;
 mod prompt;
@@ -402,6 +405,7 @@ async fn async_main() -> std::process::ExitCode {
             };
         }
     };
+    let _no_input = args.no_input.then(plugin_ui::Headless::enter);
     if args.verbose > 0 && dialect != compat::Personality::Native {
         eprintln!("hydra: {} compatibility mode", dialect.name());
     }
@@ -564,6 +568,60 @@ async fn async_main() -> std::process::ExitCode {
         };
     }
 
+    if !args.no_plugins && !multi && urls.len() == 1 && plain_download_conflict(&args).is_none() {
+        let template = match download::Job::from_cli(&args, urls.clone(), &cancel) {
+            Ok(job) => job,
+            Err(e) => {
+                eprintln!("hydra: {e}");
+                return std::process::ExitCode::from(2);
+            }
+        };
+        match plugins::resolve_job(&template).await {
+            Ok(Some((id, resolved_plan))) => {
+                if args.inspect || args.list_streams || args.list_tracks || args.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&resolved_plan).unwrap_or_default()
+                    );
+                    return std::process::ExitCode::SUCCESS;
+                }
+                let prefs = match plugins::interactive_preferences(&args, &resolved_plan).await {
+                    Ok(prefs) => prefs,
+                    Err(error) => {
+                        eprintln!("hydra plugin {id}: {error}");
+                        return std::process::ExitCode::FAILURE;
+                    }
+                };
+                if !resolved_plan.entries.is_empty() {
+                    return match plan::run_playlist(resolved_plan, template, prefs, &id).await {
+                        Ok(_) => exit_after(std::process::ExitCode::SUCCESS, &cancel),
+                        Err(error) => {
+                            eprintln!("hydra plugin {id}: {error}");
+                            exit_after(std::process::ExitCode::FAILURE, &cancel)
+                        }
+                    };
+                }
+                let code = match plan::run(resolved_plan, template, prefs, &id).await {
+                    Ok(_) => std::process::ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("hydra plugin {id}: {e}");
+                        std::process::ExitCode::FAILURE
+                    }
+                };
+                return exit_after(code, &cancel);
+            }
+            Ok(None) if args.list_tracks => {
+                eprintln!("hydra: no installed plugin returned tracks");
+                return std::process::ExitCode::FAILURE;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("hydra plugin: {e}");
+                return exit_after(std::process::ExitCode::FAILURE, &cancel);
+            }
+        }
+    }
+
     // A manifest is not a file, so it cannot go through the range scheduler.
     // Only URLs that claim to be one are tried, and only in the plain
     // download mode: --spider, --stdout, --checksum and friends all ask a
@@ -635,8 +693,15 @@ async fn async_main() -> std::process::ExitCode {
             }
             // Not a stream, and nobody asked a question: download it.
             stream::Verdict::NotAManifest => {}
-            stream::Verdict::Listed | stream::Verdict::Done { .. } => {
-                return std::process::ExitCode::SUCCESS
+            stream::Verdict::Listed => return std::process::ExitCode::SUCCESS,
+            stream::Verdict::Done { path, .. } => {
+                if !args.no_plugins {
+                    if let Err(error) = plugins::finish_job(sjob.url, path).await {
+                        eprintln!("hydra: {error}");
+                        return std::process::ExitCode::FAILURE;
+                    }
+                }
+                return std::process::ExitCode::SUCCESS;
             }
             stream::Verdict::Failed(e) => {
                 eprintln!("hydra: {e}");
@@ -701,7 +766,7 @@ async fn async_main() -> std::process::ExitCode {
         .await;
         return exit_after(code, &cancel);
     }
-    let out = download::run(job).await;
+    let out = download::run_file(job).await;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     }
@@ -723,6 +788,7 @@ async fn run_subcommand(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> std::process::ExitCode {
     match cmd {
+        cli::Command::Plugin { command } => plugins::run(command).await,
         cli::Command::Parity { what } => std::process::exit(run_parity(what)),
         cli::Command::Checksum {
             urls,
