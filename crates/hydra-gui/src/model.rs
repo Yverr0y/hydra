@@ -129,6 +129,8 @@ pub struct DownloadItem {
     /// instead of the range scheduler.
     #[serde(default)]
     pub stream: Option<StreamInfo>,
+    #[serde(default)]
+    pub plugin_plan: Option<crate::plugins::PlanInfo>,
     /// Set when this item came from a Metalink document. Its presence is what
     /// gives the transfer a mirror list, a size it can trust, a digest, and —
     /// where the document published `<pieces>` — per-chunk verification with
@@ -1682,19 +1684,7 @@ pub fn app_dir() -> PathBuf {
     if let Some(dir) = APP_DIR_OVERRIDE.get() {
         return dir.clone();
     }
-    #[cfg(target_os = "windows")]
-    {
-        dirs::config_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("hydra")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        dirs::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".config")
-            .join("hydra")
-    }
+    hya_plugin::hydra_dir()
 }
 
 /// User configuration: everything the Options/Scheduler dialogs edit.
