@@ -886,6 +886,43 @@ impl Column {
     }
 }
 
+/// The key the main download table is sorted by: either one of the columns,
+/// or the order in which items were added.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    Column(Column),
+    OrderOfAddition,
+}
+
+impl SortKey {
+    pub fn id(self) -> &'static str {
+        match self {
+            SortKey::Column(c) => c.id(),
+            SortKey::OrderOfAddition => "OrderOfAddition",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<SortKey> {
+        if id == "OrderOfAddition" || id == "Addition" {
+            Some(SortKey::OrderOfAddition)
+        } else {
+            Column::from_id(id).map(SortKey::Column)
+        }
+    }
+}
+
+impl From<Column> for SortKey {
+    fn from(c: Column) -> Self {
+        SortKey::Column(c)
+    }
+}
+
+impl Default for SortKey {
+    fn default() -> Self {
+        SortKey::Column(Column::LastTry)
+    }
+}
+
 /// How one column is presented: its place in [`Settings::columns`] is its
 /// place in the header, left to right.
 #[derive(Clone, Debug, Serialize, Deserialize)]

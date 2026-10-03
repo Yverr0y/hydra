@@ -5,7 +5,7 @@
 //! menu bar + dropdowns drawn on Windows/Linux.
 
 use crate::app::{App, El, MenuAction, MenuBarKind, Message};
-use crate::model::{Column, DlState};
+use crate::model::{Column, DlState, SortKey};
 use crate::{i18n::tr, theme};
 use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::Length;
@@ -216,15 +216,7 @@ pub fn entries(kind: MenuBarKind, app: &App) -> Vec<Entry> {
             Entry::item(tr("Hide toolbar text"), MenuAction::HideToolbarText)
                 .check(!app.cfg.settings.show_toolbar_labels),
             Entry::item(tr("Columns"), MenuAction::ManageColumns),
-            Entry::sub(
-                tr("Arrange files"),
-                // Q holds an icon, not a value a reader can arrange by.
-                Column::ALL
-                    .into_iter()
-                    .filter(|c| *c != Column::Queue)
-                    .map(|c| Entry::item(tr(c.label()), MenuAction::ArrangeBy(c)))
-                    .collect(),
-            ),
+            Entry::sub(tr("Arrange files"), arrange_entries(app)),
             Entry::sub(
                 tr("Theme"),
                 crate::theme::THEME_CHOICES
@@ -279,6 +271,26 @@ pub fn entries(kind: MenuBarKind, app: &App) -> Vec<Entry> {
     }
 }
 
+/// Submenu entries for arranging download items in the table.
+pub fn arrange_entries(app: &App) -> Vec<Entry> {
+    let mut v = Vec::new();
+    for col in Column::ALL.into_iter().filter(|c| *c != Column::Queue) {
+        let key = SortKey::Column(col);
+        v.push(Entry::item(tr(col.label()), MenuAction::ArrangeBy(key)).check(app.sort.0 == key));
+    }
+    v.push(
+        Entry::item(
+            tr("By order of addition"),
+            MenuAction::ArrangeBy(SortKey::OrderOfAddition),
+        )
+        .check(app.sort.0 == SortKey::OrderOfAddition)
+        .sep(),
+    );
+    v.push(Entry::item(tr("A-Z"), MenuAction::SortDirection(true)).check(app.sort.1));
+    v.push(Entry::item(tr("Z-A"), MenuAction::SortDirection(false)).check(!app.sort.1));
+    v
+}
+
 /// Context-menu entries for the table header, right-clicked on `col`: the
 /// column's own two moves, then a tick per column to show or hide it, then
 /// the manage dialog for the same choices in one place.
@@ -322,6 +334,7 @@ pub fn header_entries(app: &App, col: Column) -> Vec<Entry> {
         )
         .sep(),
     );
+    v.push(Entry::sub(tr("Arrange files"), arrange_entries(app)).sep());
     v.push(Entry::item(tr("Columns"), MenuAction::ManageColumns));
     v
 }
@@ -808,5 +821,38 @@ mod tests {
         let panel = Size::new(PANEL_W, 100.0);
         let view = Size::new(200.0, 600.0);
         assert_eq!(anchor(Point::new(150.0, 10.0), panel, view).x, 0.0);
+    }
+
+    #[test]
+    fn arrange_entries_lists_columns_order_of_addition_and_direction() {
+        let app = App {
+            sort: (SortKey::OrderOfAddition, false),
+            ..App::default()
+        };
+        let entries = arrange_entries(&app);
+
+        assert_eq!(entries.len(), 10);
+        let add_entry = entries
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.action,
+                    Some(MenuAction::ArrangeBy(SortKey::OrderOfAddition))
+                )
+            })
+            .expect("By order of addition entry");
+        assert!(add_entry.checked);
+
+        let za_entry = entries
+            .iter()
+            .find(|e| matches!(e.action, Some(MenuAction::SortDirection(false))))
+            .expect("Z-A entry");
+        assert!(za_entry.checked);
+
+        let az_entry = entries
+            .iter()
+            .find(|e| matches!(e.action, Some(MenuAction::SortDirection(true))))
+            .expect("A-Z entry");
+        assert!(!az_entry.checked);
     }
 }

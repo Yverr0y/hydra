@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 
 use crate::app::{App, El, Message};
-use crate::model::{Column, DlId, DownloadItem};
+use crate::model::{Column, DlId, DownloadItem, SortKey};
 use crate::{fmt, i18n::tr, icons, theme};
 use iced::widget::{column, container, mouse_area, row, scrollable, stack, svg, text};
 use iced::Length;
@@ -58,7 +58,7 @@ fn total_width(c: &[(Column, f32)]) -> f32 {
 fn header<'a>(app: &App, c: &[(Column, f32)], tw: f32) -> El<'a> {
     let mut r = row![].spacing(0);
     for (col, w) in c {
-        let arrow = if app.sort.0 == *col {
+        let arrow = if app.sort.0 == SortKey::Column(*col) {
             if app.sort.1 {
                 " \u{25b4}"
             } else {
@@ -282,7 +282,11 @@ fn cell_content<'a>(app: &App, d: &'a DownloadItem, col: Column) -> El<'a> {
         } else {
             String::new()
         }),
-        Column::LastTry => txt(d.last_try.map(fmt::date).unwrap_or_default()),
+        Column::LastTry => txt(d
+            .last_try
+            .or(Some(d.added))
+            .map(fmt::date)
+            .unwrap_or_default()),
         Column::Description => text(&d.description).size(theme::FONT_SIZE).into(),
     }
 }
