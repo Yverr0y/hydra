@@ -38,6 +38,10 @@ pub struct Route {
 
 impl Route {
     /// No proxy: every connection goes to the origin itself.
+    pub(crate) fn plugin_proxy(&self) -> Option<Proxy> {
+        self.proxy.clone()
+    }
+
     pub const fn direct() -> Self {
         Self { proxy: None }
     }
