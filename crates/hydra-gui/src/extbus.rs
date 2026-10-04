@@ -170,6 +170,8 @@ const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub enum ExtEvent {
+    /// Local file association asks for package review, never silent installation.
+    InstallPlugin(std::path::PathBuf),
     /// Single captured download -> Download File Info dialog.
     Download(ExtDownload, Ack),
     /// A manifest -> the stream-aware download path.
@@ -219,6 +221,10 @@ fn sender() -> UnboundedSender<ExtEvent> {
         tx
     })
     .clone()
+}
+
+pub(crate) fn install_plugin_file(path: std::path::PathBuf) {
+    let _ = sender().send(ExtEvent::InstallPlugin(path));
 }
 
 /// Take the receiving end (once), for the iced subscription.
@@ -344,7 +350,7 @@ fn make_token() -> String {
 /// it is asked to quit, and once its socket goes dark this returns `false`
 /// so the caller boots as the new instance. Builds that predate "shutdown"
 /// refuse it as unknown; they get the classic hand-over.
-pub fn signal_existing(minimized: bool) -> bool {
+pub fn signal_existing(minimized: bool, plugin_file: Option<&std::path::Path>) -> bool {
     let Ok(text) = std::fs::read_to_string(crate::model::app_dir().join("ipc.json")) else {
         return false;
     };
@@ -367,7 +373,11 @@ pub fn signal_existing(minimized: bool) -> bool {
     };
     let mut reader = BufReader::new(s);
     let mut request = move |kind: &str| -> Option<serde_json::Value> {
-        writeln!(out, "{{\"type\":\"{kind}\",\"token\":\"{token}\"}}").ok()?;
+        let mut body = serde_json::json!({"type":kind,"token":token});
+        if kind == "install-plugin" {
+            body["path"] = serde_json::json!(plugin_file?.to_str()?);
+        }
+        writeln!(out, "{body}").ok()?;
         let mut line = String::new();
         reader.read_line(&mut line).ok()?;
         serde_json::from_str(&line).ok()
@@ -393,6 +403,9 @@ pub fn signal_existing(minimized: bool) -> bool {
         // Still alive after 5 s (wedged exit path?): treat it as the owner.
     }
 
+    if plugin_file.is_some() {
+        return request("install-plugin").is_some_and(|reply| acked(&reply));
+    }
     if !minimized {
         return request("open").is_some_and(|r| acked(&r));
     }
@@ -533,6 +546,22 @@ fn dispatch(req: &serde_json::Value, allowed: bool) -> serde_json::Value {
             let _ = sender().send(ExtEvent::Shutdown);
             (true, None)
         }
+        Some("install-plugin") if allowed => match req
+            .get("path")
+            .and_then(|path| path.as_str())
+            .map(std::path::PathBuf::from)
+        {
+            Some(path)
+                if path.is_absolute()
+                    && path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("hyaplugin")) =>
+            {
+                install_plugin_file(path);
+                (true, None)
+            }
+            _ => (false, Some("invalid plugin package path")),
+        },
         Some("download") => match serde_json::from_value::<ExtDownload>(req.clone()) {
             Ok(dl) if !dl.url.is_empty() => {
                 // The referer travels with the item and onto every request
@@ -1047,6 +1076,20 @@ mod tests {
         // whole timeout.
         drop(rx.blocking_recv());
         assert!(!ok(replying.join().expect("dispatch thread")));
+        let path = std::path::absolute("local.HYAPLUGIN").unwrap();
+        let package = serde_json::json!({"type":"install-plugin", "path":path});
+        assert!(!ok(dispatch(&package, false)));
+        assert!(ok(dispatch(&package, true)));
+        let Some(ExtEvent::InstallPlugin(received)) = rx.blocking_recv() else {
+            panic!("package review event expected")
+        };
+        assert_eq!(received, path);
+        for invalid in ["relative.hyaplugin", "/tmp/not-a-package.txt"] {
+            assert!(!ok(dispatch(
+                &serde_json::json!({"type":"install-plugin", "path":invalid}),
+                true
+            )));
+        }
     }
 
     /// The other half of the same contract: once the socket thread has
