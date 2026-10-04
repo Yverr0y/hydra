@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "hya-cli"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "hya-gui"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "aes",
  "blake3",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "hya-host"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "serde_json",
 ]
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "hya-updater"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "blake3",
  "clap",
