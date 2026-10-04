@@ -1387,14 +1387,88 @@ pub fn normalize_hhmm(s: &str) -> String {
 }
 
 /// A shortcut as typed, in the one spelling a key press produces:
-/// `cmd`, then `shift`, then `alt`, then a single character, lowercase.
+/// The platform's primary command modifier name: "cmd" on macOS, "ctrl" elsewhere.
+pub fn primary_modifier() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    }
+}
+
+/// Convert a combo to the platform's default spelling (e.g. "cmd+n" -> "ctrl+n" on Windows/Linux).
+pub fn platform_default(combo: &str) -> String {
+    if cfg!(target_os = "macos") {
+        combo.to_string()
+    } else {
+        combo.replace("cmd+", "ctrl+")
+    }
+}
+
+/// Autocomplete modifier keywords as the user types in the shortcuts editor.
 ///
-/// `None` for anything a press can never match — no command modifier, a
-/// multi-character base, an unknown modifier — so the dialog can say so
-/// rather than store a combo that silently never fires.
+/// Converts typos like `atl` -> `alt+`, and modifier keywords (`ctrl`, `alt`,
+/// `win`, `cmd`, `shift`, etc.) into their completed `+` forms while typing forward.
+/// Deletions (backspacing) are preserved so the user can edit freely.
+pub fn autocomplete_combo(typed: &str, prev: &str) -> String {
+    let lower = typed.to_ascii_lowercase();
+    if typed.len() <= prev.len() {
+        return lower;
+    }
+
+    let cleaned = lower.replace([' ', '-'], "+");
+    let parts: Vec<&str> = cleaned.split('+').collect();
+    let trailing_plus = cleaned.ends_with('+');
+
+    fn normalize_token(t: &str) -> &str {
+        match t {
+            "atl" | "option" | "opt" => "alt",
+            "control" | "ctl" => "ctrl",
+            "windows" => "win",
+            "command" => "cmd",
+            "shft" => "shift",
+            other => other,
+        }
+    }
+
+    let mut out = Vec::new();
+    let num_parts = parts.len();
+
+    for (idx, &part) in parts.iter().enumerate() {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let norm = normalize_token(trimmed);
+        out.push(norm);
+
+        let is_last = idx == num_parts - 1;
+        if is_last
+            && !trailing_plus
+            && matches!(
+                norm,
+                "alt" | "ctrl" | "win" | "cmd" | "shift" | "super" | "meta"
+            )
+        {
+            out.push("");
+        }
+    }
+
+    if trailing_plus && !out.is_empty() && !out.last().unwrap().is_empty() {
+        out.push("");
+    }
+
+    out.join("+")
+}
+
+/// Normalize a combo into the platform's canonical representation:
+/// primary modifier ("cmd" on macOS, "ctrl" elsewhere), then optional `shift`,
+/// then optional `alt`, then a single character, lowercase.
 pub fn normalize_combo(typed: &str) -> Option<String> {
     let mut parts: Vec<String> = typed
+        .replace([' ', '-'], "+")
         .split('+')
+        .filter(|p| !p.trim().is_empty())
         .map(|p| p.trim().to_ascii_lowercase())
         .collect();
     let base = parts.pop()?;
@@ -1404,16 +1478,18 @@ pub fn normalize_combo(typed: &str) -> Option<String> {
     let (mut cmd, mut shift, mut alt) = (false, false, false);
     for part in parts {
         match part.as_str() {
-            "cmd" | "command" | "ctrl" | "control" | "meta" | "super" => cmd = true,
-            "shift" => shift = true,
-            "alt" | "option" => alt = true,
+            "cmd" | "command" | "ctrl" | "control" | "meta" | "super" | "win" | "windows" => {
+                cmd = true;
+            }
+            "shift" | "shft" => shift = true,
+            "alt" | "atl" | "option" | "opt" => alt = true,
             _ => return None,
         }
     }
     if !cmd {
         return None;
     }
-    let mut combo = String::from("cmd+");
+    let mut combo = format!("{}+", primary_modifier());
     if shift {
         combo.push_str("shift+");
     }
@@ -1724,9 +1800,13 @@ pub fn normalize_config(mut cfg: ConfigFile) -> ConfigFile {
         cfg.queues = default_queues();
     }
     for (id, combo, _) in SHORTCUT_ACTIONS {
-        cfg.shortcuts
+        let entry = cfg
+            .shortcuts
             .entry(id.to_string())
-            .or_insert_with(|| combo.to_string());
+            .or_insert_with(|| platform_default(combo));
+        if let Some(norm) = normalize_combo(entry) {
+            *entry = norm;
+        }
     }
     // Configs written before the flag existed: stock names are stock queues.
     for q in &mut cfg.queues {
@@ -2835,26 +2915,74 @@ mod tests {
     /// every editable combo has to carry.
     #[test]
     fn a_typed_shortcut_normalizes_or_is_refused() {
+        let p = primary_modifier();
         assert_eq!(
             normalize_combo("cmd+shift+v").as_deref(),
-            Some("cmd+shift+v")
+            Some(format!("{p}+shift+v").as_str())
         );
         assert_eq!(
             normalize_combo("Shift+Cmd+V").as_deref(),
-            Some("cmd+shift+v")
+            Some(format!("{p}+shift+v").as_str())
         );
         assert_eq!(
             normalize_combo("ctrl+alt+shift+r").as_deref(),
-            Some("cmd+shift+alt+r")
+            Some(format!("{p}+shift+alt+r").as_str())
         );
-        assert_eq!(normalize_combo(" CMD + , ").as_deref(), Some("cmd+,"));
+        assert_eq!(
+            normalize_combo("win+shift+v").as_deref(),
+            Some(format!("{p}+shift+v").as_str())
+        );
+        assert_eq!(
+            normalize_combo("atl+ctrl+r").as_deref(),
+            Some(format!("{p}+alt+r").as_str())
+        );
+        assert_eq!(
+            normalize_combo(" CMD + , ").as_deref(),
+            Some(format!("{p}+,").as_str())
+        );
         assert_eq!(normalize_combo("shift+v"), None, "no command modifier");
         assert_eq!(normalize_combo("cmd+F5"), None, "not a character");
         assert_eq!(normalize_combo("cmd+hyper+v"), None);
         assert_eq!(normalize_combo(""), None);
         for (_, combo, _) in SHORTCUT_ACTIONS {
-            assert_eq!(normalize_combo(combo).as_deref(), Some(combo));
+            assert_eq!(
+                normalize_combo(combo).as_deref(),
+                Some(platform_default(combo).as_str())
+            );
         }
+    }
+
+    #[test]
+    fn shortcut_autocomplete_expands_modifiers_and_fixes_typos() {
+        assert_eq!(autocomplete_combo("atl", "at"), "alt+");
+        assert_eq!(autocomplete_combo("alt", "al"), "alt+");
+        assert_eq!(autocomplete_combo("ctrl", "ctr"), "ctrl+");
+        assert_eq!(autocomplete_combo("control", "contro"), "ctrl+");
+        assert_eq!(autocomplete_combo("ctl", "ct"), "ctrl+");
+        assert_eq!(autocomplete_combo("win", "wi"), "win+");
+        assert_eq!(autocomplete_combo("windows", "window"), "win+");
+        assert_eq!(autocomplete_combo("cmd", "cm"), "cmd+");
+        assert_eq!(autocomplete_combo("command", "comman"), "cmd+");
+        assert_eq!(autocomplete_combo("shift", "shif"), "shift+");
+        assert_eq!(autocomplete_combo("shft", "shf"), "shift+");
+        assert_eq!(autocomplete_combo("option", "optio"), "alt+");
+        assert_eq!(autocomplete_combo("opt", "op"), "alt+");
+        assert_eq!(autocomplete_combo("ctrl+atl", "ctrl+at"), "ctrl+alt+");
+        assert_eq!(autocomplete_combo("ctrl a", "ctrl "), "ctrl+a");
+        assert_eq!(
+            autocomplete_combo("ctrl-shift-v", "ctrl-shift-"),
+            "ctrl+shift+v"
+        );
+        assert_eq!(
+            autocomplete_combo("ctrl", "ctrl+"),
+            "ctrl",
+            "backspace does not re-add plus"
+        );
+        assert_eq!(
+            autocomplete_combo("ctr", "ctrl"),
+            "ctr",
+            "backspace preserves deletion"
+        );
     }
 
     /// Queues are named, and a name must be free. `len() + 1` handed out

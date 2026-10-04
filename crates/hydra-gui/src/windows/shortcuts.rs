@@ -25,8 +25,13 @@ pub fn view(app: &App) -> El<'_> {
         .iter()
         .map(|(id, _, _)| app.cfg.shortcuts.get(*id).and_then(|c| normalize_combo(c)))
         .collect();
-    for (n, (id, _default, label)) in SHORTCUT_ACTIONS.iter().enumerate() {
-        let value = app.cfg.shortcuts.get(*id).cloned().unwrap_or_default();
+    for (n, (id, default, label)) in SHORTCUT_ACTIONS.iter().enumerate() {
+        let value = app
+            .cfg
+            .shortcuts
+            .get(*id)
+            .cloned()
+            .unwrap_or_else(|| crate::model::platform_default(default));
         let action = id.to_string();
         let conflict = combos[n].is_some()
             && combos

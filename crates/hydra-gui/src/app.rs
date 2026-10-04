@@ -4291,7 +4291,7 @@ impl App {
             // Earlier rows win a conflict: the later one would never fire.
             let settled = model::normalize_combo(&typed)
                 .filter(|c| !taken.contains(c))
-                .unwrap_or_else(|| default.to_string());
+                .unwrap_or_else(|| model::platform_default(default));
             taken.push(settled.clone());
             if settled != typed {
                 self.cfg.shortcuts.insert(id.to_string(), settled);
@@ -5589,8 +5589,16 @@ impl App {
                     // Exactly what the window's own close button does, which
                     // is what Cmd+W means everywhere else.
                     Some("close_window") => self.update(Message::WindowCloseRequested(win)),
-                    Some("quit") => self.update(Message::Menu(MenuAction::Exit)),
-                    _ => Task::none(),
+                    Some("quit") => {
+                        self.update(resolve_quit_action(win, cfg!(target_os = "windows")))
+                    }
+                    _ => {
+                        if cfg!(target_os = "windows") && combo == "ctrl+q" {
+                            self.update(Message::WindowCloseRequested(win))
+                        } else {
+                            Task::none()
+                        }
+                    }
                 }
             }
             Message::SelectAll => {
@@ -5738,9 +5746,9 @@ impl App {
                 self.start_download(id, true)
             }
             Message::ShortcutEdit(action, combo) => {
-                self.cfg
-                    .shortcuts
-                    .insert(action, combo.trim().to_ascii_lowercase());
+                let prev = self.cfg.shortcuts.get(&action).cloned().unwrap_or_default();
+                let completed = model::autocomplete_combo(&combo, &prev);
+                self.cfg.shortcuts.insert(action, completed);
                 self.save_config();
                 Task::none()
             }
@@ -8837,9 +8845,61 @@ fn prog_state_seed(speed_limit: Option<u64>, proxy: &ProxyChoice, details: bool)
     }
 }
 
-/// Normalize a key press into a combo string ("cmd+shift+v"). `cmd` is ⌘ on
-/// macOS and Ctrl elsewhere (`Modifiers::command()`); presses without a
-/// command modifier are not shortcuts.
+/// Resolve the Latin character for a key press taking into account the active
+/// keyboard layout and modifiers.
+///
+/// On Windows and Linux, when the user switches keyboard layout (e.g. Persian,
+/// Arabic, Cyrillic), `key` carries the layout's localized character rather
+/// than the Latin key code (e.g. 'ش' for 'a'). Using iced's `modified_key` and
+/// `physical_key` translations resolves the physical Latin key so shortcuts
+/// like Ctrl+A, Ctrl+W, Ctrl+Q continue to work across all layouts.
+pub fn resolve_latin_char(
+    key: &iced::keyboard::Key,
+    modified_key: &iced::keyboard::Key,
+    physical_key: iced::keyboard::key::Physical,
+) -> Option<char> {
+    if let Some(c) = modified_key.to_latin(physical_key) {
+        if !c.is_ascii_control() {
+            return Some(c.to_ascii_lowercase());
+        }
+    }
+    if let Some(c) = key.to_latin(physical_key) {
+        if !c.is_ascii_control() {
+            return Some(c.to_ascii_lowercase());
+        }
+    }
+    if let iced::keyboard::key::Physical::Code(code) = physical_key {
+        let punct = match code {
+            iced::keyboard::key::Code::Comma => Some(','),
+            iced::keyboard::key::Code::Period => Some('.'),
+            iced::keyboard::key::Code::Slash => Some('/'),
+            iced::keyboard::key::Code::Minus => Some('-'),
+            iced::keyboard::key::Code::Equal => Some('='),
+            iced::keyboard::key::Code::Semicolon => Some(';'),
+            iced::keyboard::key::Code::Quote => Some('\''),
+            iced::keyboard::key::Code::BracketLeft => Some('['),
+            iced::keyboard::key::Code::BracketRight => Some(']'),
+            iced::keyboard::key::Code::Backslash => Some('\\'),
+            _ => None,
+        };
+        if punct.is_some() {
+            return punct;
+        }
+    }
+    if let iced::keyboard::Key::Character(s) = key {
+        let mut chars = s.chars();
+        if let Some(c) = chars.next() {
+            if chars.next().is_none() && !c.is_ascii_control() && c.is_ascii() {
+                return Some(c.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+/// Normalize a key press into a combo string ("cmd+shift+v" or "ctrl+shift+v").
+/// `cmd` is ⌘ on macOS and `ctrl` is Ctrl elsewhere (`Modifiers::command()`);
+/// presses without a command modifier are not shortcuts.
 pub fn combo_string(key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) -> Option<String> {
     if !mods.command() {
         return None;
@@ -8848,7 +8908,7 @@ pub fn combo_string(key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) 
         iced::keyboard::Key::Character(c) => c.to_string().to_ascii_lowercase(),
         _ => return None,
     };
-    let mut combo = String::from("cmd+");
+    let mut combo = format!("{}+", crate::model::primary_modifier());
     if mods.shift() {
         combo.push_str("shift+");
     }
@@ -8857,6 +8917,16 @@ pub fn combo_string(key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) 
     }
     combo.push_str(&base);
     Some(combo)
+}
+
+/// Resolve the action for the quit shortcut: on Windows, closes the active window
+/// (same as Ctrl+W) rather than terminating the application.
+pub(crate) fn resolve_quit_action(win: iced::window::Id, is_windows: bool) -> Message {
+    if is_windows {
+        Message::WindowCloseRequested(win)
+    } else {
+        Message::Menu(MenuAction::Exit)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -8880,8 +8950,9 @@ mod tests {
         };
         let mut seen = std::collections::BTreeSet::new();
         for (id, combo, _) in crate::model::SHORTCUT_ACTIONS {
+            let combo = crate::model::platform_default(combo);
             assert!(
-                seen.insert(combo),
+                seen.insert(combo.clone()),
                 "'{combo}' is bound twice, once by '{id}'"
             );
             let mut parts: Vec<&str> = combo.split('+').collect();
@@ -8889,7 +8960,7 @@ mod tests {
             let mut mods = Modifiers::empty();
             for part in parts {
                 mods |= match part {
-                    "cmd" => command,
+                    "cmd" | "ctrl" => command,
                     "shift" => Modifiers::SHIFT,
                     "alt" => Modifiers::ALT,
                     other => panic!("'{id}' uses an unknown modifier '{other}'"),
@@ -8897,10 +8968,89 @@ mod tests {
             }
             assert_eq!(
                 super::combo_string(&Key::Character(base.into()), mods).as_deref(),
-                Some(combo),
+                Some(combo.as_str()),
                 "'{id}' ships a combo no key press normalizes to"
             );
         }
+    }
+
+    #[test]
+    fn resolve_latin_char_handles_localized_keyboard_layouts() {
+        use iced::keyboard::key::{Code, Named, Physical};
+        use iced::keyboard::Key;
+
+        // Latin layout
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Character("a".into()),
+                &Key::Character("a".into()),
+                Physical::Code(Code::KeyA)
+            ),
+            Some('a')
+        );
+
+        // Persian (Farsi) layout: 'ش' is on physical KeyA
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Character("ش".into()),
+                &Key::Character("ش".into()),
+                Physical::Code(Code::KeyA)
+            ),
+            Some('a')
+        );
+
+        // Russian Cyrillic: 'ц' is on physical KeyW
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Character("ц".into()),
+                &Key::Character("ц".into()),
+                Physical::Code(Code::KeyW)
+            ),
+            Some('w')
+        );
+
+        // Windows Ctrl+A control code \x01 with modified_key "a"
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Character("\x01".into()),
+                &Key::Character("a".into()),
+                Physical::Code(Code::KeyA)
+            ),
+            Some('a')
+        );
+
+        // Physical Comma on non-Latin layout
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Character("،".into()),
+                &Key::Character("،".into()),
+                Physical::Code(Code::Comma)
+            ),
+            Some(',')
+        );
+
+        // Named key returns None (preserved for Escape, Enter, F4)
+        assert_eq!(
+            super::resolve_latin_char(
+                &Key::Named(Named::Escape),
+                &Key::Named(Named::Escape),
+                Physical::Code(Code::Escape)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn quit_shortcut_action_per_platform() {
+        let win = iced::window::Id::unique();
+        assert!(matches!(
+            super::resolve_quit_action(win, true),
+            super::Message::WindowCloseRequested(w) if w == win
+        ));
+        assert!(matches!(
+            super::resolve_quit_action(win, false),
+            super::Message::Menu(super::MenuAction::Exit)
+        ));
     }
 
     /// The Connection tab's list is only as good as the entry the transfer
@@ -11822,7 +11972,9 @@ mod tests {
     fn shortcuts_are_settled_when_the_dialog_closes() {
         let mut app = App::default();
         for (id, combo, _) in crate::model::SHORTCUT_ACTIONS {
-            app.cfg.shortcuts.insert(id.to_string(), combo.to_string());
+            app.cfg
+                .shortcuts
+                .insert(id.to_string(), crate::model::platform_default(combo));
         }
         let win = window::Id::unique();
         app.windows.insert(win, WinKind::Shortcuts);
@@ -11836,13 +11988,16 @@ mod tests {
             "cmd+shift+n".into(),
         ));
         let _ = app.update(Message::CloseThis(win));
-        assert_eq!(app.cfg.shortcuts["add_url"], "cmd+shift+n");
+        let p = crate::model::primary_modifier();
+        assert_eq!(app.cfg.shortcuts["add_url"], format!("{p}+shift+n"));
         assert_eq!(
-            app.cfg.shortcuts["scheduler"], "cmd+e",
+            app.cfg.shortcuts["scheduler"],
+            format!("{p}+e"),
             "unusable goes back to default"
         );
         assert_eq!(
-            app.cfg.shortcuts["options"], "cmd+,",
+            app.cfg.shortcuts["options"],
+            format!("{p}+,"),
             "the later action loses the conflict"
         );
     }
