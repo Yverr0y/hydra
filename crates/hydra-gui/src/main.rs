@@ -355,19 +355,28 @@ fn subscription(app: &App) -> Subscription<Message> {
             // on Windows) are the fixed conventions that do not, and nothing
             // else is passed on — an unconsumed keystroke otherwise costs a
             // full repaint.
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
-                if status == iced::event::Status::Ignored
-                    && (modifiers.command()
-                        || matches!(
-                            key,
-                            iced::keyboard::Key::Named(
-                                iced::keyboard::key::Named::Escape
-                                    | iced::keyboard::key::Named::Enter
-                                    | iced::keyboard::key::Named::F4
-                            )
-                        )) =>
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key,
+                modified_key,
+                physical_key,
+                modifiers,
+                ..
+            }) if status == iced::event::Status::Ignored
+                && (modifiers.command()
+                    || matches!(
+                        key,
+                        iced::keyboard::Key::Named(
+                            iced::keyboard::key::Named::Escape
+                                | iced::keyboard::key::Named::Enter
+                                | iced::keyboard::key::Named::F4
+                        )
+                    )) =>
             {
-                Some(Message::RawKey(key, modifiers, window))
+                let resolved_key =
+                    crate::app::resolve_latin_char(&key, &modified_key, physical_key)
+                        .map(|c| iced::keyboard::Key::Character(c.to_string().into()))
+                        .unwrap_or(key);
+                Some(Message::RawKey(resolved_key, modifiers, window))
             }
             iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                 Some(Message::MouseUp)
