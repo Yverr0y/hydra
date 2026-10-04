@@ -84,6 +84,24 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>${NUM_VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${NUM_VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleDocumentTypes</key>
+    <array><dict>
+      <key>CFBundleTypeName</key><string>Hydra Plugin Package</string>
+      <key>CFBundleTypeExtensions</key><array><string>hyaplugin</string></array>
+      <key>LSItemContentTypes</key><array><string>io.github.ja7ad.hydra.plugin-package</string></array>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Owner</string>
+    </dict></array>
+    <key>UTExportedTypeDeclarations</key>
+    <array><dict>
+      <key>UTTypeIdentifier</key><string>io.github.ja7ad.hydra.plugin-package</string>
+      <key>UTTypeDescription</key><string>Hydra Plugin Package</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key><dict>
+        <key>public.filename-extension</key><array><string>hyaplugin</string></array>
+        <key>public.mime-type</key><string>application/x-hydra-plugin</string>
+      </dict>
+    </dict></array>
     <key>CFBundleIconFile</key><string>hydra</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key><true/>
