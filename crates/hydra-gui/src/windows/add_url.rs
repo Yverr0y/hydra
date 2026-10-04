@@ -21,8 +21,17 @@ const GAP: f32 = 8.0;
 
 /// Every label in the column, so one width fits all of them and the rows
 /// stay aligned.
-const LABELS: [&str; 6] = [
-    "Address", "Cookies", "Stream", "Quality", "Record", "Metalink",
+const LABELS: [&str; 10] = [
+    "Address",
+    "Cookies",
+    "Stream",
+    "Quality",
+    "Record",
+    "Metalink",
+    "Video",
+    "Audio",
+    "Audio format",
+    "Container",
 ];
 
 fn label_w() -> f32 {
@@ -192,6 +201,7 @@ pub fn view(app: &App) -> El<'_> {
                     )
                     .text_size(theme::FONT_SIZE)
                     .style(theme::picker)
+                    .menu_style(theme::picker_menu)
                     .padding([5, 8])
                     .width(250.0),
                     text(tr("Save as")).size(theme::FONT_SIZE),
@@ -209,6 +219,7 @@ pub fn view(app: &App) -> El<'_> {
                     )
                     .text_size(theme::FONT_SIZE)
                     .style(theme::picker)
+                    .menu_style(theme::picker_menu)
                     .padding([5, 8])
                     .width(100.0),
                 ]
@@ -248,10 +259,13 @@ pub fn view(app: &App) -> El<'_> {
     // 6 KB playlist named like a video is a puzzle for the user to solve.
     let probe_error = st.stream_error.as_ref().or(st.metalink_error.as_ref());
     let error: El<'_> = match st.error.as_ref().or(probe_error) {
-        Some(e) => text(e.clone())
-            .size(theme::FONT_SIZE)
-            .color(theme::error_text())
-            .into(),
+        Some(e) => iced::widget::scrollable(
+            text(e.clone())
+                .size(theme::FONT_SIZE)
+                .color(theme::error_text()),
+        )
+        .height(error_panel_height(e))
+        .into(),
         None if !st.address.trim().is_empty()
             && crate::app::site_blocked(st.address.trim(), &app.cfg.settings.dont_start_sites) =>
         {
@@ -266,7 +280,7 @@ pub fn view(app: &App) -> El<'_> {
     };
 
     // Nothing may be added while the address is still being read.
-    let probing = st.stream_probing || st.metalink_probing;
+    let probing = st.stream_probing || st.metalink_probing || st.plugin_probing;
     let buttons = column![
         dlg_btn_primary(tr("OK"), (!probing).then_some(Message::AddUrlOk)),
         dlg_btn(
@@ -357,21 +371,254 @@ pub fn view(app: &App) -> El<'_> {
         iced::widget::space::horizontal().height(0.0).into()
     };
 
-    // A blank line under Login/Password separates the fixed part of the
-    // dialog from whatever a probed address adds beneath.
-    let left = column![
-        address,
-        auth,
-        creds,
-        cookies,
-        cookie_note,
-        iced::widget::space::vertical().height(GAP),
-        stream,
-        metalink,
-        error
-    ]
-    .spacing(GAP)
-    .width(Length::Fill);
+    let mut plugins = column![].spacing(GAP);
+    if st.plugin_probing {
+        plugins = plugins.push(text(tr("Reading plugin tracks…")).size(theme::FONT_SIZE));
+    }
+    if let Some(info) = &st.plugin_plan {
+        plugins = plugins.push(
+            iced::widget::scrollable(
+                text(plugin_title(info))
+                    .size(theme::FONT_SIZE)
+                    .width(Length::Fill),
+            )
+            .height(title_height(info)),
+        );
+        plugins = plugins.push(
+            row![
+                iced::widget::space::horizontal().width(label_w()),
+                check(info.preferences.audio_only, tr("Audio only"))
+                    .on_toggle(Message::PluginAudioOnly),
+            ]
+            .spacing(GAP)
+            .align_y(iced::Alignment::Center),
+        );
+        if info.preferences.audio_only {
+            plugins = plugins.push(
+                row![
+                    label(tr("Audio format")),
+                    pick_list(
+                        vec![
+                            "Original".to_string(),
+                            "mp3".into(),
+                            "m4a".into(),
+                            "opus".into(),
+                            "flac".into(),
+                            "wav".into()
+                        ],
+                        Some(
+                            info.preferences
+                                .audio_format
+                                .clone()
+                                .unwrap_or_else(|| "Original".into())
+                        ),
+                        Message::PluginAudioFormat
+                    )
+                    .text_size(theme::FONT_SIZE)
+                    .padding([5, 8])
+                    .style(theme::picker)
+                    .menu_style(theme::picker_menu)
+                    .width(Length::Fill),
+                ]
+                .spacing(GAP)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        if !info.plan.entries.is_empty() {
+            let mut entries = column![].spacing(6);
+            for entry in &info.plan.entries {
+                let id = entry.id.clone();
+                let checked = info
+                    .preferences
+                    .playlist_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&id));
+                entries = entries.push(
+                    check(
+                        checked,
+                        entry.title.clone().unwrap_or_else(|| entry.id.clone()),
+                    )
+                    .on_toggle(move |checked| Message::PluginPlaylistEntry(id.clone(), checked)),
+                );
+            }
+            plugins = plugins.push(text(tr("Playlist items")).size(theme::FONT_SIZE));
+            plugins = plugins.push(
+                iced::widget::scrollable(entries)
+                    .width(Length::Fill)
+                    .height(list_height(info.plan.entries.len(), 24.0, 120.0)),
+            );
+            plugins = plugins.push(
+                text(tr("Selected videos will be added to the main queue."))
+                    .size(theme::FONT_SIZE - 1.0),
+            );
+            if !info.preferences.audio_only {
+                plugins = plugins.push(
+                    row![
+                        label(tr("Quality")),
+                        pick_list(
+                            vec![
+                                "Best".to_string(),
+                                "2160p".into(),
+                                "1440p".into(),
+                                "1080p".into(),
+                                "720p".into(),
+                                "480p".into()
+                            ],
+                            Some(
+                                info.preferences
+                                    .max_height
+                                    .map(|height| format!("{height}p"))
+                                    .unwrap_or_else(|| "Best".into())
+                            ),
+                            |quality: String| Message::PluginMaxHeight(
+                                quality.trim_end_matches('p').parse().ok()
+                            )
+                        )
+                        .text_size(theme::FONT_SIZE)
+                        .padding([5, 8])
+                        .style(theme::picker)
+                        .menu_style(theme::picker_menu)
+                        .width(Length::Fill)
+                    ]
+                    .spacing(GAP),
+                );
+            }
+        }
+        for (kind, track_label) in [
+            (hya_plugin_api::TrackKind::Video, "Video"),
+            (hya_plugin_api::TrackKind::Audio, "Audio"),
+        ] {
+            if !info.plan.entries.is_empty()
+                || (kind == hya_plugin_api::TrackKind::Video && info.preferences.audio_only)
+            {
+                continue;
+            }
+            if !info.plan.tracks.iter().any(|track| track.kind == kind) {
+                continue;
+            }
+            let mut ids = vec!["Best".to_string()];
+            if kind == hya_plugin_api::TrackKind::Audio {
+                ids.push("None".into());
+            }
+            ids.extend(
+                info.plan
+                    .tracks
+                    .iter()
+                    .filter(|t| t.kind == kind)
+                    .map(|t| t.id.clone()),
+            );
+            let selected = info
+                .preferences
+                .track_ids
+                .iter()
+                .find(|id| info.plan.track(id).is_some_and(|t| t.kind == kind))
+                .cloned()
+                .unwrap_or_else(|| {
+                    if kind == hya_plugin_api::TrackKind::Audio
+                        && info.preferences.audio == hya_plugin_api::AudioPref::None
+                    {
+                        "None".into()
+                    } else {
+                        "Best".into()
+                    }
+                });
+            plugins = plugins.push(
+                row![
+                    label(tr(track_label)),
+                    pick_list(
+                        ids.iter()
+                            .map(|id| TrackChoice::new(id, &info.plan))
+                            .collect::<Vec<_>>(),
+                        Some(TrackChoice::new(&selected, &info.plan)),
+                        move |choice| Message::PluginTrack(kind, choice.id)
+                    )
+                    .text_size(theme::FONT_SIZE)
+                    .padding([5, 8])
+                    .style(theme::picker)
+                    .menu_style(theme::picker_menu)
+                    .width(Length::Fill)
+                ]
+                .spacing(GAP)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        let mut subtitles = column![].spacing(4);
+        for track in info
+            .plan
+            .tracks
+            .iter()
+            .filter(|t| t.kind == hya_plugin_api::TrackKind::Subtitle)
+        {
+            let id = track.id.clone();
+            subtitles = subtitles.push(
+                check(
+                    info.preferences.track_ids.contains(&id),
+                    format!(
+                        "{} · {}{}",
+                        track.language.as_deref().unwrap_or(&id),
+                        track.container.as_deref().unwrap_or(""),
+                        if track.auto_generated { " (auto)" } else { "" }
+                    ),
+                )
+                .on_toggle(move |value| Message::PluginSubtitle(id.clone(), value)),
+            );
+        }
+        if info
+            .plan
+            .tracks
+            .iter()
+            .any(|track| track.kind == hya_plugin_api::TrackKind::Subtitle)
+        {
+            plugins = plugins.push(text(tr("Subtitles")).size(theme::FONT_SIZE));
+            plugins = plugins.push(
+                iced::widget::scrollable(subtitles)
+                    .width(Length::Fill)
+                    .height(list_height(subtitle_count(info), 22.0, 90.0)),
+            );
+        }
+        if !info.preferences.audio_only {
+            plugins = plugins.push(
+                row![
+                    label(tr("Container")),
+                    pick_list(
+                        vec!["mp4".to_string(), "mkv".to_string(), "webm".to_string()],
+                        info.preferences.container.clone(),
+                        Message::PluginContainer
+                    )
+                    .text_size(theme::FONT_SIZE)
+                    .padding([5, 8])
+                    .style(theme::picker)
+                    .menu_style(theme::picker_menu)
+                    .width(Length::Fill)
+                ]
+                .spacing(GAP)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+    }
+
+    let mut left = column![address, auth, creds, cookies]
+        .spacing(GAP)
+        .width(Length::Fill);
+    if st.cookies_importing || st.cookie_note.is_some() {
+        left = left.push(cookie_note);
+    }
+    if st.stream_probing || st.stream.is_some() {
+        left = left.push(stream);
+    }
+    if st.metalink_probing || st.metalink.is_some() {
+        left = left.push(metalink);
+    }
+    if st.plugin_probing || st.plugin_plan.is_some() {
+        left = left.push(plugins);
+    }
+    if st.error.is_some()
+        || probe_error.is_some()
+        || (!st.address.trim().is_empty()
+            && crate::app::site_blocked(st.address.trim(), &app.cfg.settings.dont_start_sites))
+    {
+        left = left.push(error);
+    }
 
     // OK over Cancel on the right, level with the Address box.
     container(row![left, buttons].spacing(16).padding(12))
@@ -379,4 +626,115 @@ pub fn view(app: &App) -> El<'_> {
         .height(Length::Fill)
         .style(theme::window)
         .into()
+}
+
+fn plugin_title(info: &crate::plugins::PlanInfo) -> String {
+    format!(
+        "{}: {}",
+        info.plugin,
+        info.plan.title.as_deref().unwrap_or(&info.plan.id)
+    )
+}
+
+fn title_height(info: &crate::plugins::PlanInfo) -> f32 {
+    if crate::font::line_width(&plugin_title(info), theme::FONT_SIZE) > 580.0 {
+        34.0
+    } else {
+        17.0
+    }
+}
+
+fn list_height(count: usize, row_height: f32, maximum: f32) -> f32 {
+    (count as f32 * row_height).min(maximum)
+}
+
+/// Reserves space for wrapped diagnostics while bounding the dialog height.
+pub(crate) fn error_panel_height(error: &str) -> f32 {
+    let lines: usize = error
+        .lines()
+        .map(|line| line.chars().count().div_ceil(70).max(1))
+        .sum();
+    (lines as f32 * 20.0).clamp(40.0, 120.0)
+}
+
+fn subtitle_count(info: &crate::plugins::PlanInfo) -> usize {
+    info.plan
+        .tracks
+        .iter()
+        .filter(|track| track.kind == hya_plugin_api::TrackKind::Subtitle)
+        .count()
+}
+
+pub(crate) fn plugin_panel_height(st: &crate::app::AddUrlState) -> f32 {
+    let mut height = if st.plugin_probing { 25.0 } else { 0.0 };
+    let Some(info) = &st.plugin_plan else {
+        return height;
+    };
+    height += GAP + title_height(info) + GAP + 18.0;
+    if info.preferences.audio_only {
+        height += 36.0;
+    }
+    if !info.plan.entries.is_empty() {
+        height += 25.0 + list_height(info.plan.entries.len(), 24.0, 120.0) + GAP + 23.0;
+        if !info.preferences.audio_only {
+            height += 36.0;
+        }
+    } else {
+        for kind in [
+            hya_plugin_api::TrackKind::Video,
+            hya_plugin_api::TrackKind::Audio,
+        ] {
+            if !(kind == hya_plugin_api::TrackKind::Video && info.preferences.audio_only)
+                && info.plan.tracks.iter().any(|track| track.kind == kind)
+            {
+                height += 36.0;
+            }
+        }
+    }
+    let subtitles = subtitle_count(info);
+    if subtitles > 0 {
+        height += 25.0 + list_height(subtitles, 22.0, 90.0) + GAP;
+    }
+    if !info.preferences.audio_only {
+        height += 36.0;
+    }
+    height
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrackChoice {
+    id: String,
+    label: String,
+}
+impl TrackChoice {
+    fn new(id: &str, plan: &hya_plugin_api::Plan) -> Self {
+        let label = plan
+            .track(id)
+            .map(|track| {
+                let mut parts = vec![track.id.clone()];
+                if let Some(height) = track.height {
+                    parts.push(format!("{height}p"));
+                }
+                if let Some(codec) = &track.codec {
+                    parts.push(codec.clone());
+                }
+                if let Some(container) = &track.container {
+                    parts.push(container.clone());
+                }
+                if let Some(language) = &track.language {
+                    parts.push(language.clone());
+                }
+                parts.join(" · ")
+            })
+            .unwrap_or_else(|| tr(id));
+        Self {
+            id: id.into(),
+            label,
+        }
+    }
+}
+impl std::fmt::Display for TrackChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
