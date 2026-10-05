@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Stage the signed, platform-independent bundle for application packaging."""
+import argparse
+import io
+import pathlib
+import shutil
+import tempfile
+import urllib.request
+import zipfile
+
+
+def stage(root, version):
+    destination = root / "plugins/bundled"
+    marker = destination / "bundle-version.txt"
+    if (marker.is_file() and marker.read_text().strip() == version
+            and any(destination.glob("*.hyaplugin"))):
+        return destination
+    address = f"https://github.com/ja7ad/hydra/releases/download/v{version}/hydra-official-plugins.zip"
+    with urllib.request.urlopen(address, timeout=60) as response:
+        data = response.read(64 * 1024 * 1024 + 1)
+    if len(data) > 64 * 1024 * 1024:
+        raise ValueError("official bundle exceeds 64 MiB")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+        staging = pathlib.Path(temporary) / "bundled"
+        staging.mkdir()
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            names = set()
+            total = 0
+            for entry in archive.infolist():
+                if (entry.filename != pathlib.PurePosixPath(entry.filename).name
+                        or not entry.filename.endswith(".hyaplugin")
+                        or entry.filename in names or entry.file_size > 16 * 1024 * 1024):
+                    raise ValueError("invalid official bundle entry")
+                total += entry.file_size
+                if len(names) >= 64 or total > 64 * 1024 * 1024:
+                    raise ValueError("official bundle exceeds extraction limit")
+                names.add(entry.filename)
+                (staging / entry.filename).write_bytes(archive.read(entry))
+            if not names:
+                raise ValueError("empty official bundle")
+        (staging / "bundle-version.txt").write_text(version + "\n")
+        if destination.exists():
+            shutil.rmtree(destination)
+        staging.rename(destination)
+    return destination
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", required=True)
+    args = parser.parse_args()
+    print(stage(pathlib.Path(__file__).resolve().parents[2], args.version))
+
+
+if __name__ == "__main__":
+    main()

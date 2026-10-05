@@ -77,7 +77,7 @@ jobs:
 
   verify-packaging:
     name: Validate packaging metadata
-    needs: [verify-version]
+    needs: [verify-version, build-official-plugins]
     # Distribution packaging is a stable-release concern. A pre-release ships
     # the archives, the native installers, the AppImage and libhydra, and is
     # never pushed to Copr, the PPA, the AUR or Flathub (see the gates on the
@@ -90,6 +90,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Download signed official plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: official-plugins
+          path: official-plugins
 
       - name: Install packaging validation tools
         run: |
@@ -112,6 +118,7 @@ jobs:
           # rather than a check of something Copr never runs.
           git archive --format=tar.gz --prefix="hydra-${VERSION}/" HEAD \
             > "$RPM_TOP/SOURCES/hydra-${VERSION}.tar.gz"
+          cp official-plugins/hydra-official-plugins.zip "$RPM_TOP/SOURCES/"
           scripts/render-rpm-spec.sh "$VERSION" "$RPM_TOP/SPECS/hydra.spec"
           grep -q "^%global _version ${VERSION}$" "$RPM_TOP/SPECS/hydra.spec"
           rpmbuild -bs --nodeps --define "_topdir $RPM_TOP" "$RPM_TOP/SPECS/hydra.spec"
@@ -138,13 +145,15 @@ jobs:
         run: cargo test --locked -p hya-cli --test plugins
       - name: Build executables
         run: cargo build --locked -p hya-cli -p hya-plugin-cli
+      - name: Test official bundle staging
+        run: python3 -m unittest discover -s scripts/plugins -p 'test_stage_official.py'
       - name: Exercise plugin download and interactive TUI
         if: runner.os != 'Windows'
         run: python3 scripts/plugins/cli-e2e.py
 
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
-    needs: [verify-version, verify-plugin-tools]
+    needs: [verify-version, verify-plugin-tools, build-official-plugins]
     strategy:
       fail-fast: false
       matrix:
@@ -187,6 +196,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
     env:
+      HYDRA_OFFICIAL_PLUGIN_DIR: ${{ github.workspace }}/plugins/bundled
       VERSION: ${{ needs.verify-version.outputs.version }}
       PLATFORM: ${{ matrix.os }}-${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
@@ -194,6 +204,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Download signed official plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: official-plugins
+          path: plugins/bundled
 
       # musl-tools is for the static CLI below: `ring` and `blake3` compile C
       # and assembly, so the musl target needs a C compiler that knows the musl
@@ -411,7 +426,7 @@ jobs:
   # UpdateMethod::AppImage in crates/hydra-updater.
   build-appimage:
     name: AppImage ${{ matrix.arch }}
-    needs: [verify-version]
+    needs: [verify-version, build-official-plugins]
     strategy:
       fail-fast: false
       matrix:
@@ -430,6 +445,7 @@ jobs:
       run:
         shell: bash
     env:
+      HYDRA_OFFICIAL_PLUGIN_DIR: ${{ github.workspace }}/plugins/bundled
       VERSION: ${{ needs.verify-version.outputs.version }}
       TARGET: ${{ matrix.target }}
       DEBIAN_FRONTEND: noninteractive
@@ -455,6 +471,11 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Download signed official plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: official-plugins
+          path: plugins/bundled
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -630,7 +651,7 @@ jobs:
   # the release version.
   build-flatpak:
     name: Flatpak ${{ matrix.arch }}
-    needs: [verify-version, verify-packaging]
+    needs: [verify-version, verify-packaging, build-official-plugins]
     if: needs.verify-version.outputs.prerelease == 'false'
     strategy:
       fail-fast: false
@@ -646,6 +667,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Download signed official plugins
+        uses: actions/download-artifact@v4
+        with:
+          name: official-plugins
+          path: plugins/bundled
 
       - name: Install Flatpak build tools
         run: |
@@ -1067,7 +1093,14 @@ jobs:
           target/debug/hydra-plugin sign plugins/hydra-youtube/youtube-download.hyaplugin \
             --output dist/youtube-download.hyaplugin \
             --public-key plugins/official.pub --key-env HYDRA_PLUGIN_SIGNING_KEY
+          printf '%s\n' "${{ needs.verify-version.outputs.version }}" > dist/bundle-version.txt
           cp plugins/official.pub dist/hydra-official-plugins.pub
+          python3 - <<'PYZIP'
+          import pathlib, zipfile
+          with zipfile.ZipFile("dist/hydra-official-plugins.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+              for package in sorted(pathlib.Path("dist").glob("*.hyaplugin")):
+                  archive.write(package, package.name)
+          PYZIP
       - uses: actions/upload-artifact@v4
         with:
           name: official-plugins
@@ -1186,6 +1219,8 @@ jobs:
             mkdir -p "$RPM_TOP/SOURCES" "$RPM_TOP/SRPMS" "$RPM_TOP/SPECS" "$RPM_TOP/BUILD"
             git archive --format=tar.gz --prefix="hydra-${VERSION}/" HEAD > "$RPM_TOP/SOURCES/hydra-${VERSION}.tar.gz"
 
+            cp dist/hydra-official-plugins.zip "$RPM_TOP/SOURCES/"
+
             # Render the spec with the release version baked in. Copr imports
             # the spec and the tarball into dist-git and then re-runs
             # `rpmbuild -bs` in mock without our command-line defines, so the
@@ -1249,6 +1284,8 @@ jobs:
               | xargs -0 perl -pi -e 's/"files":\{[^}]*\}/"files":{}/'
 
             # Copy Debian packaging files to debian/ directory
+            mkdir -p plugins/bundled
+            cp dist/*.hyaplugin plugins/bundled/
             cp -r packaging/debian debian
             mv cargo-vendor.toml debian/cargo-vendor.toml
 

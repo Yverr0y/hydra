@@ -37,6 +37,13 @@ jobs:
           git archive --format=tar.gz --prefix="hydra-${VERSION}/" HEAD \
             > "$RPM_TOP/SOURCES/hydra-${VERSION}.tar.gz"
 
+          # This job checks source-RPM metadata without release signing secrets.
+          python3 - "$RPM_TOP/SOURCES/hydra-official-plugins.zip" <<'PYZIP'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1], "w") as archive:
+              archive.writestr("VALIDATION-ONLY.txt", "Not a distributable plugin bundle.\n")
+          PYZIP
+
           scripts/render-rpm-spec.sh "" "$RPM_TOP/SPECS/hydra.spec"
           grep -q "^%global _version ${VERSION}$" "$RPM_TOP/SPECS/hydra.spec"
 
@@ -308,6 +315,8 @@ jobs:
           echo "WASI_SDK_PATH=$RUNNER_TEMP/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
       - name: Scaffold, build, validate and execute all five SDKs
         run: python3 plugins/sdk/test.py
+      - name: Test official bundle staging
+        run: python3 -m unittest discover -s scripts/plugins -p 'test_stage_official.py'
       - name: Test and package the official YouTube plugin
         run: |
           cargo test --manifest-path plugins/hydra-youtube/Cargo.toml

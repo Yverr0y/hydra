@@ -2349,6 +2349,7 @@ dependencies = [
  "hya-plugin-api",
  "idna",
  "libc",
+ "minisign",
  "minisign-verify",
  "semver",
  "serde",

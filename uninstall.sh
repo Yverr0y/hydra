@@ -214,11 +214,12 @@ for d in "${MANIFEST_DIRS[@]}"; do
   rm_path "$d/com.hydra.host.json"
 done
 
+CONFIG_DIR="${HYDRA_CONFIG_DIR:-$USER_HOME/.config/hydra}"
 if [ "$PURGE" = 1 ]; then
-  rm_path "$USER_HOME/.config/hydra"
+  rm_path "$CONFIG_DIR"
 else
-  [ -d "$USER_HOME/.config/hydra" ] \
-    && echo "kept $USER_HOME/.config/hydra (config/state/logs); rerun with --purge to delete it"
+  [ -d "$CONFIG_DIR" ] \
+    && echo "kept $CONFIG_DIR (config/state/logs/plugins); rerun with --purge to delete it"
 fi
 
 if [ "$REMOVED" = 1 ]; then

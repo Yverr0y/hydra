@@ -332,6 +332,9 @@ try {
     Write-Host "added $InstallDir to your user PATH (open a new terminal to pick it up)"
   }
 
+  & (Join-Path $InstallDir "hydra.exe") plugin sync-official --require-bundled
+  if ($LASTEXITCODE -ne 0) { throw "Official plugin installation failed ($LASTEXITCODE)" }
+
   Write-Host "done."
 }
 finally {

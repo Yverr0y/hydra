@@ -101,6 +101,77 @@ impl Manager {
             _lock: lock,
         })
     }
+    /// Opens a CLI or GUI profile and installs newer bundled official plugins.
+    ///
+    /// Removed plugins, development overrides and other publishers are preserved.
+    /// # Errors
+    /// Returns an error for damaged state, invalid signatures or installation failure.
+    pub fn open_with_official(root: PathBuf) -> Result<Self, PluginError> {
+        let mut manager = Self::open(root)?;
+        manager.sync_official(crate::official::PACKAGES, crate::official::KEY)?;
+        Ok(manager)
+    }
+
+    fn sync_official(&mut self, archives: &[&[u8]], key: &str) -> Result<(), PluginError> {
+        if archives.is_empty() {
+            return Ok(());
+        }
+        let path = self.root.join("official.json");
+        let mut seen: BTreeMap<String, String> = read_json(&path)?;
+        let key = key
+            .lines()
+            .find(|line| !line.starts_with("untrusted comment:"))
+            .unwrap_or("")
+            .trim();
+        for bytes in archives {
+            let hash = package::sha256_hex(bytes);
+            if seen.values().any(|previous| previous == &hash) {
+                continue;
+            }
+            let package = package::open(bytes, None).map_err(error)?;
+            if package.manifest.publisher_key.as_deref() != Some(key)
+                || !matches!(package.signing, package::Signing::Verified { .. })
+            {
+                return Err(PluginError::new(
+                    ErrorCode::PermissionDenied,
+                    "official plugin is not signed by Hydra",
+                ));
+            }
+            let id = &package.manifest.id;
+            let previous = self.list().iter().find(|plugin| &plugin.manifest.id == id);
+            let should_install = match previous {
+                Some(old) => {
+                    !old.dev
+                        && old.manifest.publisher_key.as_deref() == Some(key)
+                        && matches!(old.signing, package::Signing::Verified { .. })
+                        && semver::Version::parse(&package.manifest.version).map_err(error)?
+                            > semver::Version::parse(&old.manifest.version).map_err(error)?
+                }
+                None => !seen.contains_key(id),
+            };
+            if crate::distribution::compatible(
+                package.manifest.api,
+                package.manifest.min_hydra.as_deref(),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            if should_install {
+                let enabled = previous.is_none_or(|old| old.enabled);
+                let mut file = tempfile::NamedTempFile::new().map_err(error)?;
+                file.write_all(bytes).map_err(error)?;
+                let installed = self.install(file.path(), package.manifest.permissions.clone())?;
+                if !enabled {
+                    self.enable(&installed, false)?;
+                }
+            }
+            seen.insert(id.clone(), hash);
+            write_atomic(&path, &serde_json::to_vec(&seen).map_err(error)?)?;
+        }
+        Ok(())
+    }
+
     /// Lists plugins in resolver precedence order.
     pub fn list(&self) -> &[Installed] {
         &self.state.plugins
@@ -1005,6 +1076,161 @@ mod tests {
         )
         .unwrap();
     }
+    fn official_package(pair: &minisign::KeyPair, version: &str, extra: &str) -> Vec<u8> {
+        let directory = tempfile::tempdir().unwrap();
+        fixture(directory.path(), r#"{"skip":true}"#);
+        let manifest_path = directory.path().join(package::MANIFEST_NAME);
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("0.1.0", version);
+        let manifest = format!("publisher_key = {:?}\n{extra}\n{manifest}\n[[settings]]\nkey='quality'\nlabel='Quality'\ntype='text'\ndefault='best'\n", pair.pk.to_base64());
+        std::fs::write(&manifest_path, manifest).unwrap();
+        let mut entries = BTreeMap::new();
+        for name in [package::MANIFEST_NAME, "plugin.wasm"] {
+            entries.insert(name, std::fs::read(directory.path().join(name)).unwrap());
+        }
+        let sums = entries
+            .iter()
+            .map(|(name, data)| format!("{}  {name}\n", package::sha256_hex(data)))
+            .collect::<String>();
+        let signature = minisign::sign(
+            Some(&pair.pk),
+            &pair.sk,
+            std::io::Cursor::new(sums.as_bytes()),
+            None,
+            None,
+        )
+        .unwrap();
+        entries.insert(package::SUMS_NAME, sums.into_bytes());
+        entries.insert(package::SIGNATURE_NAME, signature.to_string().into_bytes());
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn official_sync_installs_once_and_updates_without_losing_user_state() {
+        let root = tempfile::tempdir().unwrap();
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let key = pair.pk.to_base64();
+        let first = official_package(&pair, "1.0.0", "");
+        let second = official_package(&pair, "1.1.0", "");
+        let mut manager = Manager::open(root.path().into()).unwrap();
+        manager.sync_official(&[&first], &key).unwrap();
+        assert!(manager.list()[0].enabled);
+        assert!(!manager.list()[0].dev);
+        assert!(matches!(
+            manager.list()[0].signing,
+            package::Signing::Verified { .. }
+        ));
+        manager
+            .set("example.direct", "quality", Value::Text("small".into()))
+            .unwrap();
+        manager.enable("example.direct", false).unwrap();
+        let data = root.path().join("example.direct/data/saved");
+        std::fs::write(&data, "retained").unwrap();
+        manager.sync_official(&[&first], &key).unwrap();
+        assert!(manager.list()[0].previous.is_none());
+        manager.sync_official(&[&second], &key).unwrap();
+        assert_eq!(manager.list()[0].manifest.version, "1.1.0");
+        assert!(!manager.list()[0].enabled);
+        assert_eq!(
+            manager.list()[0].settings["quality"],
+            Value::Text("small".into())
+        );
+        assert_eq!(std::fs::read_to_string(data).unwrap(), "retained");
+        assert_eq!(
+            manager.list()[0]
+                .previous
+                .as_ref()
+                .unwrap()
+                .manifest
+                .version,
+            "1.0.0"
+        );
+        drop(manager);
+        let mut manager = Manager::open(root.path().into()).unwrap();
+        manager.sync_official(&[&second], &key).unwrap();
+        assert!(!manager.list()[0].enabled);
+        manager.sync_official(&[&first], &key).unwrap();
+        assert_eq!(manager.list()[0].manifest.version, "1.1.0");
+        manager.remove("example.direct").unwrap();
+        let third = official_package(&pair, "1.2.0", "");
+        manager.sync_official(&[&third], &key).unwrap();
+        assert!(manager.list().is_empty());
+    }
+
+    #[test]
+    fn official_sync_preserves_other_publishers_and_development_overrides() {
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let key = pair.pk.to_base64();
+        let official = official_package(&pair, "1.1.0", "");
+        let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let custom = official_package(&other, "1.0.0", "");
+        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("custom.hyaplugin");
+        std::fs::write(&source, custom).unwrap();
+        let mut manager = Manager::open(root.path().into()).unwrap();
+        manager
+            .install(
+                &source,
+                Manager::inspect(&source).unwrap().manifest.permissions,
+            )
+            .unwrap();
+        manager.sync_official(&[&official], &key).unwrap();
+        assert_eq!(
+            manager.list()[0].manifest.publisher_key.as_deref(),
+            Some(other.pk.to_base64().as_str())
+        );
+        manager.remove("example.direct").unwrap();
+        fixture(directory.path(), r#"{"skip":true}"#);
+        manager
+            .install(
+                directory.path(),
+                Manager::inspect(directory.path())
+                    .unwrap()
+                    .manifest
+                    .permissions,
+            )
+            .unwrap();
+        let newer = official_package(&pair, "2.0.0", "");
+        manager.sync_official(&[&newer], &key).unwrap();
+        assert!(manager.list()[0].dev);
+    }
+
+    #[test]
+    fn official_sync_rejects_untrusted_packages_and_corrupt_tracking() {
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = Manager::open(root.path().into()).unwrap();
+        assert!(manager.sync_official(&[], "").is_ok());
+        assert!(manager.sync_official(&[b"broken"], "").is_err());
+        let directory = tempfile::tempdir().unwrap();
+        fixture(directory.path(), r#"{"skip":true}"#);
+        let unsigned = package::pack(directory.path()).unwrap();
+        assert!(manager.sync_official(&[&unsigned], "").is_err());
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signed = official_package(&pair, "1.0.0", "");
+        assert!(manager
+            .sync_official(&[&signed], crate::official::KEY)
+            .is_err());
+        assert!(manager.list().is_empty());
+        let future = official_package(&pair, "1.0.0", "min_hydra='999.0.0'");
+        manager
+            .sync_official(&[&future], &pair.pk.to_base64())
+            .unwrap();
+        assert!(manager.list().is_empty());
+        std::fs::write(root.path().join("official.json"), "broken").unwrap();
+        assert!(manager
+            .sync_official(&[&signed], &pair.pk.to_base64())
+            .is_err());
+    }
+
     struct Quiet;
     impl Frontend for Quiet {
         fn prompt(

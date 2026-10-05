@@ -38,6 +38,7 @@ build-options:
     - --share=network
   env:
     CARGO_HOME: /run/build/hydra/cargo
+    HYDRA_OFFICIAL_PLUGIN_DIR: /run/build/hydra/plugins/bundled
 
 modules:
   - name: hydra

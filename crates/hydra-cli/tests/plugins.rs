@@ -390,3 +390,14 @@ fn plugin_table_handles_empty_profiles_missing_authors_and_control_characters() 
     assert!(table.contains('—'));
     assert!(!table.contains('\x1b'));
 }
+
+#[test]
+fn official_sync_accepts_source_builds_and_reports_missing_release_bundle() {
+    let root = tempfile::tempdir().unwrap();
+    run(root.path(), &["plugin", "sync-official"], true);
+    run(
+        root.path(),
+        &["plugin", "sync-official", "--require-bundled"],
+        hya_plugin::official::bundled(),
+    );
+}

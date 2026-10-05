@@ -29,3 +29,7 @@
 
 # Publisher private keys must stay outside version control.
 *.key
+
+/plugins/bundled/
+
+/scripts/plugins/__pycache__/
