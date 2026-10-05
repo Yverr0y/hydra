@@ -288,6 +288,12 @@ pub(crate) fn run_with_proxy(
         redactions.push(address);
     }
     let secrets = &redactions;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|e| {
         PluginError::new(
             ErrorCode::ToolMissing,
@@ -297,20 +303,31 @@ pub(crate) fn run_with_proxy(
     let out = drain(child.stdout.take().expect("piped"));
     let err = drain(child.stderr.take().expect("piped"));
 
+    let mut status = None;
     let status = loop {
         if let Err(e) = ctl.check() {
+            #[cfg(unix)]
+            {
+                // Descendants inherit the pipes, so killing only the parent cannot unblock readers.
+                // SAFETY: the child leads its own process group; the negative PID targets that group.
+                unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            }
             let _ = child.kill();
             let _ = child.wait();
             let _ = (out.join(), err.join());
             return Err(e);
         }
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => {
-                return Err(PluginError::new(ErrorCode::Internal, format!("wait: {e}")));
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|e| PluginError::new(ErrorCode::Internal, format!("wait: {e}")))?;
+        }
+        if let Some(status) = status {
+            if out.is_finished() && err.is_finished() {
+                break status;
             }
         }
+        std::thread::sleep(Duration::from_millis(10));
     };
     let (stdout, over_out) = out.join().unwrap_or_default();
     let (stderr, _) = err.join().unwrap_or_default();
@@ -550,6 +567,24 @@ mod tests {
         }
 
         #[test]
+        fn deadline_kills_descendants_after_the_parent_exits() {
+            let d = tmp("orphan-pipes");
+            script(&d, "t", "sleep 30 &\nexit 0");
+            let pinned = pin("t", std::slice::from_ref(&d)).unwrap();
+            let started = std::time::Instant::now();
+            let e = run(
+                &pinned,
+                &[],
+                &d,
+                &CallCtl::new(Duration::from_millis(150)),
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(e.code, ErrorCode::Deadline);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
         fn cancel_kills_the_child() {
             let d = tmp("cancel");
             script(&d, "t", "sleep 30");
@@ -560,10 +595,12 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(100));
                 c2.cancel();
             });
+            let started = std::time::Instant::now();
             assert_eq!(
                 run(&pinned, &[], &d, &c, &[]).unwrap_err().code,
                 ErrorCode::Cancelled
             );
+            assert!(started.elapsed() < Duration::from_secs(5));
         }
 
         #[test]
