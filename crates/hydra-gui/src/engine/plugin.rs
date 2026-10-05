@@ -67,7 +67,8 @@ async fn run_with_root(
     context.only = spec.plugin_plan.as_ref().map(|p| p.plugin.clone());
     let ctl = context.ctl.clone();
     let mut worker = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut manager = hya_plugin::manager::Manager::open(root).map_err(|e| e.to_string())?;
+        let mut manager =
+            hya_plugin::manager::Manager::open_with_official(root).map_err(|e| e.to_string())?;
         let connector =
             hya_plugin::http::connector(context.proxy.as_ref()).map_err(|e| e.to_string())?;
         manager
@@ -490,7 +491,8 @@ async fn refresh(
     }
     let ctl = context.ctl.clone();
     let mut worker = tokio::task::spawn_blocking(move || {
-        let mut manager = hya_plugin::manager::Manager::open(root).map_err(|e| e.to_string())?;
+        let mut manager =
+            hya_plugin::manager::Manager::open_with_official(root).map_err(|e| e.to_string())?;
         let connector =
             hya_plugin::http::connector(context.proxy.as_ref()).map_err(|e| e.to_string())?;
         manager
@@ -560,7 +562,8 @@ pub(super) async fn with_hooks(
     };
     let ctl = context.ctl.clone();
     let mut worker = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let manager = hya_plugin::manager::Manager::open(root).map_err(|e| e.to_string())?;
+        let manager =
+            hya_plugin::manager::Manager::open_with_official(root).map_err(|e| e.to_string())?;
         let connector =
             hya_plugin::http::connector(context.proxy.as_ref()).map_err(|e| e.to_string())?;
         let path = std::path::Path::new(&path);

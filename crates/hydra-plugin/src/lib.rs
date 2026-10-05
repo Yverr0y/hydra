@@ -12,6 +12,7 @@ pub mod dirs;
 pub mod distribution;
 pub mod manager;
 pub mod media;
+pub mod official;
 pub use dirs::hydra_dir;
 
 /// Describes every permission a frontend must display before granting it.

@@ -57,7 +57,7 @@ pub async fn resolve(
 ) -> Result<Option<PlanInfo>, String> {
     let root = crate::model::app_dir().join("plugins");
     tokio::task::spawn_blocking(move || {
-        let mut manager = Manager::open(root).map_err(|e| e.to_string())?;
+        let mut manager = Manager::open_with_official(root).map_err(|e| e.to_string())?;
         let mut context = hya_plugin::manager::ResolveContext {
             proxy: crate::proxy::active().plugin_proxy(),
             ..Default::default()
@@ -191,7 +191,7 @@ fn wrap(m: Message) -> crate::app::Message {
     crate::app::Message::Plugin(m)
 }
 fn manager() -> Result<Manager, String> {
-    Manager::open(crate::model::app_dir().join("plugins")).map_err(|e| e.to_string())
+    Manager::open_with_official(crate::model::app_dir().join("plugins")).map_err(|e| e.to_string())
 }
 pub fn load() -> Task<crate::app::Message> {
     Task::perform(

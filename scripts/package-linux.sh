@@ -73,6 +73,9 @@ SUMMARY="Multi-connection download manager (GUI, CLI, browser integration)"
 OUT="$REPO/target/dist"
 mkdir -p "$OUT"
 
+python3 scripts/plugins/stage-official.py --version "$VERSION"
+export HYDRA_OFFICIAL_PLUGIN_DIR="$REPO/plugins/bundled"
+
 if [ "$BUILD" = 1 ]; then
   cargo build --release -p hya-cli -p hya-gui -p hya-host
 fi

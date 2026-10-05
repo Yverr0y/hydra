@@ -63,8 +63,8 @@ pub async fn resolve_job(
         if let Some(cookies) = cookies {
             context.cookies = cookies.open(&host, hya_net::cookies::now_secs())?.0;
         }
-        let mut manager =
-            Manager::open(hya_plugin::hydra_dir().join("plugins")).map_err(|e| e.to_string())?;
+        let mut manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))
+            .map_err(|e| e.to_string())?;
         let connector =
             hya_plugin::http::connector(context.proxy.as_ref()).map_err(|e| e.to_string())?;
         manager
@@ -81,8 +81,8 @@ pub async fn resolve_job(
 
 pub async fn finish_job(url: String, path: PathBuf) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let manager =
-            Manager::open(hya_plugin::hydra_dir().join("plugins")).map_err(|e| e.to_string())?;
+        let manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))
+            .map_err(|e| e.to_string())?;
         let connector = hya_net::tls::TlsCapableConnector::new().map_err(|e| e.to_string())?;
         let request = hya_plugin_api::CompleteRequest {
             url,
@@ -128,8 +128,8 @@ pub async fn refresh_plan(
             let host = crate::url::Url::parse(&url).ok_or("invalid address")?.host;
             context.cookies = cookies.open(&host, hya_net::cookies::now_secs())?.0;
         }
-        let mut manager =
-            Manager::open(hya_plugin::hydra_dir().join("plugins")).map_err(|e| e.to_string())?;
+        let mut manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))
+            .map_err(|e| e.to_string())?;
         let connector =
             hya_plugin::http::connector(context.proxy.as_ref()).map_err(|e| e.to_string())?;
         manager
@@ -322,6 +322,12 @@ pub async fn interactive_preferences(
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Install or update the signed official plugins bundled with Hydra.
+    SyncOfficial {
+        /// Fail if this binary was built without official plugin packages.
+        #[arg(long)]
+        require_bundled: bool,
+    },
     List {
         /// Print the complete installed metadata as JSON.
         #[arg(long)]
@@ -614,8 +620,13 @@ fn info_text(plugin: &hya_plugin::manager::Installed, color: bool) -> String {
 pub async fn run(command: &Command) -> std::process::ExitCode {
     let command = command.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut manager = Manager::open(hya_plugin::hydra_dir().join("plugins"))?;
+        let mut manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))?;
         match command {
+            Command::SyncOfficial { require_bundled } => {
+                if require_bundled && !hya_plugin::official::bundled() {
+                    return Err("this build contains no official plugins".into());
+                }
+            },
             Command::Info { id, json } => {
                 let installed = manager.list().iter().find(|p|p.manifest.id==id).ok_or("unknown plugin")?;
                 if json { println!("{}", serde_json::to_string_pretty(installed)?); }

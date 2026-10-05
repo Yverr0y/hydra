@@ -33,6 +33,7 @@ wasmi = "2.0.0"
 toml = "1.1.6"
 
 [dev-dependencies]
+minisign = "0.9.1"
 wat = "1.261.0"
 
 [lints]

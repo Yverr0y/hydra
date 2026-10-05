@@ -556,4 +556,8 @@ case ":$PATH:" in
   *) echo "note: $BIN_DIR is not on your PATH" >&2 ;;
 esac
 
+# Synchronize signed plugins in the human user's shared CLI/GUI profile.
+run_as_user env HYDRA_CONFIG_DIR="${HYDRA_CONFIG_DIR:-$USER_HOME/.config/hydra}" \
+  "$BIN_DIR/hydra" plugin sync-official --require-bundled
+
 echo "done."

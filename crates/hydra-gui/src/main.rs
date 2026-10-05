@@ -293,11 +293,14 @@ fn boot() -> (App, Task<Message>) {
         .map(|path| app.update(Message::InstallPluginFile(path)))
         .unwrap_or_else(Task::none);
     if start_hidden {
-        (app, Task::batch([check, install]))
+        (app, Task::batch([check, install, plugins::load()]))
     } else {
         let open_main = app.open_window(WinKind::Main);
         let perm = app.check_folder_access();
-        (app, Task::batch([open_main, perm, check, install]))
+        (
+            app,
+            Task::batch([open_main, perm, check, install, plugins::load()]),
+        )
     }
 }
 

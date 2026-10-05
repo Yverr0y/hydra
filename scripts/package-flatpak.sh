@@ -91,6 +91,8 @@ command -v flatpak-builder >/dev/null 2>&1 || {
   exit 1
 }
 
+python3 scripts/plugins/stage-official.py --version "$VERSION"
+
 ARCH=$(uname -m)
 BUILD_DIR="$REPO/target/flatpak-build"
 REPO_DIR="$REPO/target/flatpak-repo"
