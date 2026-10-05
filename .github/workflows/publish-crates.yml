@@ -144,3 +144,8 @@ jobs:
           publish_crate hya-plugin-api --allow-dirty
           publish_crate hya-plugin-sdk --allow-dirty
           publish_crate hya-plugin --allow-dirty
+
+      # rust-cache mistakes packaged source tests for build artifacts.
+      - name: Remove temporary crate packages before cache cleanup
+        if: always()
+        run: rm -rf -- target/package

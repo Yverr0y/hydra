@@ -21,6 +21,7 @@
 /plugins/sdk/**/target/
 /plugins/sdk/**/*.wasm
 /plugins/sdk/**/__pycache__/
+**/__pycache__/*
 
 # Generated copies for crates.io packaging.
 /crates/hydra-plugin/product-version.txt
