@@ -388,30 +388,34 @@ fn init(path: &Path, project: Project) -> Result<()> {
     }
     result
 }
+fn standalone_sdk_manifest(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace("edition.workspace = true", "edition = \"2021\"")
+        .replace(
+            "license.workspace = true",
+            "license = \"MIT OR Apache-2.0\"",
+        )
+        .replace(
+            "repository.workspace = true",
+            "repository = \"https://github.com/ja7ad/hydra\"",
+        )
+        .replace(
+            "homepage.workspace = true",
+            "homepage = \"https://hydra.javad.dev\"",
+        )
+        .replace(
+            "serde = { workspace = true }",
+            "serde = { version = \"1\", features = [\"derive\"] }",
+        )
+        .replace("serde_json = { workspace = true }", "serde_json = \"1\"")
+        .replace("[lints]\nworkspace = true", "")
+}
 fn scaffold(path: &Path, project: &Project) -> Result<()> {
     for (name, text) in ASSETS {
         let text = if *name == "crates/hydra-plugin-sdk/Cargo.toml"
             || *name == "crates/hydra-plugin-api/Cargo.toml"
         {
-            text.replace("edition.workspace = true", "edition = \"2021\"")
-                .replace(
-                    "license.workspace = true",
-                    "license = \"MIT OR Apache-2.0\"",
-                )
-                .replace(
-                    "repository.workspace = true",
-                    "repository = \"https://github.com/ja7ad/hydra\"",
-                )
-                .replace(
-                    "homepage.workspace = true",
-                    "homepage = \"https://hydra.javad.dev\"",
-                )
-                .replace(
-                    "serde = { workspace = true }",
-                    "serde = { version = \"1\", features = [\"derive\"] }",
-                )
-                .replace("serde_json = { workspace = true }", "serde_json = \"1\"")
-                .replace("[lints]\nworkspace = true", "")
+            standalone_sdk_manifest(text)
         } else {
             (*text).to_owned()
         };
@@ -652,6 +656,28 @@ mod tests {
             .unwrap()
             .contains("must not already exist"));
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn vendored_sdk_manifests_are_standalone_with_lf_and_crlf() {
+        for name in [
+            "crates/hydra-plugin-api/Cargo.toml",
+            "crates/hydra-plugin-sdk/Cargo.toml",
+        ] {
+            let source = ASSETS.iter().find(|(n, _)| *n == name).unwrap().1;
+            let source = source.replace("\r\n", "\n");
+            for newline in ["\n", "\r\n"] {
+                let manifest = standalone_sdk_manifest(&source.replace('\n', newline));
+                let manifest: toml::Value = toml::from_str(&manifest).unwrap();
+                assert!(manifest.get("lints").is_none(), "{name}: {newline:?}");
+                for field in ["edition", "license", "repository", "homepage"] {
+                    assert!(manifest["package"][field].is_str(), "{name}: {field}");
+                }
+                for (_, dependency) in manifest["dependencies"].as_table().unwrap() {
+                    assert!(dependency.get("workspace").is_none(), "{name}");
+                }
+            }
+        }
     }
 
     #[test]
