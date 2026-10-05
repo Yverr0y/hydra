@@ -1,6 +1,6 @@
 name: Publish crates
 
-# The library crates (hya-core, hya-net, hya-stream) version and ship
+# The library and plugin authoring crates version and ship
 # independently of the product release: they are published when their own
 # manifest version is bumped past what crates.io serves, not when a vX.Y.Z tag
 # is cut. Release tags —
@@ -13,6 +13,11 @@ on:
       - "crates/hydra-core/Cargo.toml"
       - "crates/hydra-net/Cargo.toml"
       - "crates/hydra-stream/Cargo.toml"
+      - "crates/hydra-plugin-api/Cargo.toml"
+      - "crates/hydra-plugin-sdk/Cargo.toml"
+      - "crates/hydra-plugin/Cargo.toml"
+      - "scripts/plugins/stage-crates.py"
+      - "scripts/crates-io-index.sh"
       - ".github/workflows/publish-crates.yml"
   workflow_dispatch:
 
@@ -44,7 +49,7 @@ jobs:
 
           PUBLISH=false
           PENDING=""
-          for crate in hya-core hya-net hya-stream; do
+          for crate in hya-core hya-net hya-stream hya-plugin-api hya-plugin-sdk hya-plugin; do
             version=$(crate_version "$crate")
             latest=$(latest_indexed_version "$crate")
             if [ -z "$latest" ]; then
@@ -115,8 +120,8 @@ jobs:
             exit 1
           }
 
-          # Topological dependency order. Only the library crates go to
-          # crates.io; hya-cli / hya-gui / hya-host / hya-updater are
+          # Topological dependency order. Libraries and the plugin authoring
+          # tool go to crates.io; hya-cli / hya-gui / hya-host / hya-updater are
           # `publish = false` and ship as release binaries instead:
           # 1. hya-core (pure algorithmic foundation, no intra-workspace deps)
           # 2. hya-net and hya-stream (both depend on hya-core only, so they
@@ -133,3 +138,9 @@ jobs:
           pin_workspace_dependency_version hya-core
           publish_crate hya-net --allow-dirty
           publish_crate hya-stream --allow-dirty
+
+          pin_workspace_dependency_version hya-net
+          python3 scripts/plugins/stage-crates.py
+          publish_crate hya-plugin-api --allow-dirty
+          publish_crate hya-plugin-sdk --allow-dirty
+          publish_crate hya-plugin --allow-dirty

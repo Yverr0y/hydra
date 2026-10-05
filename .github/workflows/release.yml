@@ -116,9 +116,35 @@ jobs:
           grep -q "^%global _version ${VERSION}$" "$RPM_TOP/SPECS/hydra.spec"
           rpmbuild -bs --nodeps --define "_topdir $RPM_TOP" "$RPM_TOP/SPECS/hydra.spec"
 
+  verify-plugin-tools:
+    name: Verify plugin tools on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Exercise authoring commands and compiled Rust scaffold
+        run: cargo test --locked -p hya-plugin-cli -- --include-ignored
+      - name: Exercise plugin lifecycle and transfers
+        run: cargo test --locked -p hya-cli --test plugins
+      - name: Build executables
+        run: cargo build --locked -p hya-cli -p hya-plugin-cli
+      - name: Exercise plugin download and interactive TUI
+        if: runner.os != 'Windows'
+        run: python3 scripts/plugins/cli-e2e.py
+
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
-    needs: [verify-version]
+    needs: [verify-version, verify-plugin-tools]
     strategy:
       fail-fast: false
       matrix:
@@ -199,8 +225,8 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build CLI, GUI, native-messaging host, and update finisher
-        run: cargo build --release --locked --target ${{ matrix.target }} -p hya-cli -p hya-gui -p hya-host -p hya-updater
+      - name: Build CLI, GUI, native-messaging host, update finisher, and plugin authoring tool
+        run: cargo build --release --locked --target ${{ matrix.target }} -p hya-cli -p hya-gui -p hya-host -p hya-updater -p hya-plugin-cli
 
       # A second build of the CLI, not a replacement for the first: the GUI
       # archive, the deb and the rpm keep the glibc `hydra` they are packaged
@@ -218,16 +244,18 @@ jobs:
           # against a loader even fewer systems have. cc-rs reads this under
           # the raw triple; `env` because it is not a shell identifier.
           env "CC_${CLI_TARGET}=musl-gcc" \
-            cargo build --release --locked --target "$CLI_TARGET" -p hya-cli
+            cargo build --release --locked --target "$CLI_TARGET" -p hya-cli -p hya-plugin-cli
           # The whole point of this leg is a binary that needs nothing from the
           # host, so assert it rather than trust it. A PT_INTERP entry names a
           # dynamic loader and a NEEDED entry names a shared library; a
           # static-pie has neither.
-          BIN="target/${CLI_TARGET}/release/hydra"
-          if readelf -l -d "$BIN" | grep -E 'INTERP|NEEDED'; then
-            echo "error: $BIN is dynamically linked; the CLI archive must be static" >&2
-            exit 1
-          fi
+          for TOOL in hydra hydra-plugin; do
+            BIN="target/${CLI_TARGET}/release/${TOOL}"
+            if readelf -l -d "$BIN" | grep -E 'INTERP|NEEDED'; then
+              echo "error: $BIN is dynamically linked; the CLI archives must be static" >&2
+              exit 1
+            fi
+          done
 
       - name: Package artifacts
         shell: bash
@@ -240,8 +268,13 @@ jobs:
           [ "${{ matrix.os }}" = windows ] && EXT=".exe"
 
           CLI_NAME="hydra-cli-${VERSION}-${PLATFORM}"
+          PLUGIN_NAME="hydra-plugin-cli-${VERSION}-${PLATFORM}"
           GUI_NAME="hydra-${VERSION}-${PLATFORM}"
-          mkdir -p dist "stage/${CLI_NAME}" "stage/${GUI_NAME}/extensions"
+          mkdir -p dist "stage/${CLI_NAME}" "stage/${PLUGIN_NAME}" "stage/${GUI_NAME}/extensions"
+
+          cp "${CLI_BIN}/hydra-plugin${EXT}" "stage/${PLUGIN_NAME}/"
+          cp LICENSE-MIT LICENSE-APACHE "stage/${PLUGIN_NAME}/"
+          cp crates/hydra-plugin-cli/README.md "stage/${PLUGIN_NAME}/"
 
           # CLI archive: the standalone `hydra` binary only.
           cp "${CLI_BIN}/hydra${EXT}" "stage/${CLI_NAME}/"
@@ -294,9 +327,11 @@ jobs:
 
           if [ "${{ matrix.os }}" = windows ]; then
             (cd stage && 7z a "../dist/${CLI_NAME}.zip" "${CLI_NAME}")
+            (cd stage && 7z a "../dist/${PLUGIN_NAME}.zip" "${PLUGIN_NAME}")
             (cd stage && 7z a "../dist/${GUI_NAME}.zip" "${GUI_NAME}")
           else
             tar -czf "dist/${CLI_NAME}.tar.gz" -C stage "${CLI_NAME}"
+            tar -czf "dist/${PLUGIN_NAME}.tar.gz" -C stage "${PLUGIN_NAME}"
             tar -czf "dist/${GUI_NAME}.tar.gz" -C stage "${GUI_NAME}"
           fi
           ls -lh dist/
@@ -1010,6 +1045,35 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  build-official-plugins:
+    name: Build and sign official plugins
+    needs: [verify-version, verify-plugin-tools]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: Build official YouTube plugin
+        run: python3 plugins/build.py hydra-youtube
+      - name: Sign and verify official package
+        env:
+          HYDRA_PLUGIN_SIGNING_KEY: ${{ secrets.HYDRA_PLUGIN_SIGNING_KEY }}
+        run: |
+          target/debug/hydra-plugin sign plugins/hydra-youtube/youtube-download.hyaplugin \
+            --output dist/youtube-download.hyaplugin \
+            --public-key plugins/official.pub --key-env HYDRA_PLUGIN_SIGNING_KEY
+          cp plugins/official.pub dist/hydra-official-plugins.pub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-plugins
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
@@ -1027,6 +1091,7 @@ jobs:
         build-ffi-apple,
         build-extensions,
         build-safari-extension,
+        build-official-plugins,
       ]
     # The packaging jobs above are skipped for a pre-release, and the default
     # "every need succeeded" rule would take this job down with them. Require
