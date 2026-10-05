@@ -1,5 +1,6 @@
 #!/usr/bin/make -f
 export DH_VERBOSE = 1
+export HYDRA_OFFICIAL_PLUGIN_DIR := $(CURDIR)/plugins/bundled
 
 # Ubuntu jammy and noble default rustc/cargo to 1.75, which cannot parse a
 # version-4 Cargo.lock and sits below this dependency tree's MSRV.

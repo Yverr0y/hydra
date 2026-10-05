@@ -197,6 +197,13 @@ instdir_ok:
 
   SetOutPath "$INSTDIR"
   File "${BUILD_DIR}\hydra-gui.exe"
+  File "${BUILD_DIR}\hydra.exe"
+  nsExec::ExecToLog '"$INSTDIR\hydra.exe" plugin sync-official --require-bundled'
+  Pop $0
+  StrCmp $0 "0" official_plugins_ok
+  SetErrorLevel 2
+  Abort "Official plugin installation failed. See the installation details."
+official_plugins_ok:
   File "hydra.ico"
   File "..\..\LICENSE"
 
@@ -271,9 +278,8 @@ Section "Browser IPC Host" SEC_HOST
   WriteRegStr HKCU "Software\Mozilla\NativeMessagingHosts\${HOST_NAME}"                    "" "$INSTDIR\${HOST_NAME}.firefox.json"
 SectionEnd
 
-Section "Command-Line Tool (hydra, hya) + PATH" SEC_CLI
+Section "Command-Line Alias (hya) + PATH" SEC_CLI
   SetOutPath "$INSTDIR"
-  File "${BUILD_DIR}\hydra.exe"
   ; The short second name for the CLI: `hydra` is also THC-Hydra, the login
   ; auditor, and three letters types better for a command run as often as a
   ; download. A second copy rather than a link: this installer runs per-user

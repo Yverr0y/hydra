@@ -3,7 +3,22 @@
 Official plugin folders are standalone Rust workspaces targeting `wasm32-wasip1`.
 Language SDKs are in [sdk](sdk/README.md); `hydra-plugin` scaffolds Rust, Python,
 JavaScript, C and Go projects.
-Plugins are installed explicitly and are not bundled with Hydra installers.
+Official release builds bundle signed plugins. Installers synchronize them into
+Hydra's user configuration directory with their declared permissions. The deb,
+rpm and Flatpak packages do this on first launch for each user. CLI and GUI load them automatically. Application upgrades
+install newer bundled plugin versions without network access, preserving settings,
+data and disabled state. Removed plugins stay removed across application upgrades;
+manual installation remains available. Development overrides and packages signed
+by other publishers are never replaced automatically.
+
+Packaging stages signed release packages with
+`python3 scripts/plugins/stage-official.py --version VERSION`, or supplies
+`plugins/bundled/*.hyaplugin` directly in release CI. `HYDRA_OFFICIAL_PLUGIN_DIR`
+selects an explicit bundle and fails the build if empty. Ordinary source builds
+remain usable without bundled plugins. The installer command
+`hydra plugin sync-official --require-bundled` detects an incomplete build.
+`uninstall.sh` retains plugin settings and data by default; `--purge` removes the
+shared profile, including plugins (and respects `HYDRA_CONFIG_DIR`).
 Hydra's core crates contain no service-specific extractors or host lists.
 
 Build and package a plugin (Linux, macOS, Windows):
@@ -78,7 +93,8 @@ recomputes all checksums, signs `SHA256SUMS`, checks the signature against
 `official.pub`, and validates the final archive before writing the output.
 It leaves the original manifest and unsigned package unchanged. A verified
 signature proves possession of the declared publisher key; users can compare
-its fingerprint with the official public key. It does not grant permissions.
+its fingerprint with the official public key. Third-party signatures do not grant permissions; only the bundled official
+publisher is trusted for automatic installation.
 
 `hydra plugin info PLUGIN_ID` shows `Signed (verified)` and the publisher's
 SHA-256 fingerprint, or `Unsigned`. Signed text is green in a terminal;

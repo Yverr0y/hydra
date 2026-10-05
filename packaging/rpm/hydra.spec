@@ -22,6 +22,7 @@ Summary:        Multi-connection download manager (GUI, CLI, browser integration
 License:        GPL-3.0-or-later
 URL:            https://github.com/ja7ad/hydra
 Source0:        https://github.com/ja7ad/hydra/archive/v%{version}/hydra-%{version}.tar.gz
+Source1:        https://github.com/ja7ad/hydra/releases/download/v%{version}/hydra-official-plugins.zip
 
 # Both ship /usr/bin/hydra.
 Conflicts:      hydra
@@ -37,6 +38,7 @@ BuildRequires:  libXrandr-devel
 BuildRequires:  libxcb-devel
 BuildRequires:  libxkbcommon-devel
 BuildRequires:  python3
+BuildRequires:  unzip
 BuildRequires:  desktop-file-utils
 
 %description
@@ -48,9 +50,11 @@ the browser extensions under /usr/share/hydra-download-manager/extensions.
 
 %prep
 %autosetup -n hydra-%{version}
+mkdir -p plugins/bundled
+unzip -q %{SOURCE1} -d plugins/bundled
 
 %build
-cargo build --release -p hya-cli -p hya-gui -p hya-host
+HYDRA_OFFICIAL_PLUGIN_DIR="$PWD/plugins/bundled" cargo build --release -p hya-cli -p hya-gui -p hya-host
 
 %install
 rm -rf %{buildroot}

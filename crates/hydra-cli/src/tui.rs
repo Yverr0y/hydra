@@ -1102,10 +1102,11 @@ async fn run_interactive(
                                         .recv()
                                         .map_err(|e| e.to_string())?
                                         .map_err(|e| e.to_string())?;
-                                    let mut manager = hya_plugin::manager::Manager::open(
-                                        hya_plugin::hydra_dir().join("plugins"),
-                                    )
-                                    .map_err(|e| e.to_string())?;
+                                    let mut manager =
+                                        hya_plugin::manager::Manager::open_with_official(
+                                            hya_plugin::hydra_dir().join("plugins"),
+                                        )
+                                        .map_err(|e| e.to_string())?;
                                     for (key, value) in values {
                                         if plugin.manifest.settings.iter().any(|f| {
                                             f.key == key
@@ -1146,7 +1147,7 @@ async fn run_interactive(
                         ui.mode = Mode::Plugins;
                         tokio::task::spawn_blocking(move || {
                             let result = (|| -> Result<_, String> {
-                                let mut manager = hya_plugin::manager::Manager::open(
+                                let mut manager = hya_plugin::manager::Manager::open_with_official(
                                     hya_plugin::hydra_dir().join("plugins"),
                                 )
                                 .map_err(|e| e.to_string())?;
