@@ -37,6 +37,13 @@ jobs:
           git archive --format=tar.gz --prefix="hydra-${VERSION}/" HEAD \
             > "$RPM_TOP/SOURCES/hydra-${VERSION}.tar.gz"
 
+          # This job checks source-RPM metadata without release signing secrets.
+          python3 - "$RPM_TOP/SOURCES/hydra-official-plugins.zip" <<'PYZIP'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1], "w") as archive:
+              archive.writestr("VALIDATION-ONLY.txt", "Not a distributable plugin bundle.\n")
+          PYZIP
+
           scripts/render-rpm-spec.sh "" "$RPM_TOP/SPECS/hydra.spec"
           grep -q "^%global _version ${VERSION}$" "$RPM_TOP/SPECS/hydra.spec"
 
