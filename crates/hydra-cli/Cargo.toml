@@ -13,6 +13,10 @@ name = "hydra"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
+rpassword = "7"
+hya-plugin = { path = "../hydra-plugin" }
+hya-plugin-api = { path = "../hydra-plugin-api" }
 hya-core = { workspace = true }
 hya-net = { workspace = true }
 # HLS/DASH manifests and segment assembly, shared with the desktop app so
@@ -43,3 +47,6 @@ blake3 = { version = "1", features = ["pure"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+wat = "1.261.0"

@@ -374,6 +374,7 @@ fn download(i: u64) -> DownloadItem {
         shutdown_after: false,
         shutdown_action: Default::default(),
         stream: None,
+        plugin_plan: None,
         metalink: None,
         name_locked: false,
         proxy: Default::default(),
@@ -525,4 +526,306 @@ fn profile_main_window() {
             h.report("wheel scroll");
         }
     }
+}
+
+#[test]
+fn plugin_list_settings_and_info_render() {
+    use crate::app::OptTab;
+    use crate::plugins::Detail;
+    use hya_plugin_api::{Field, FieldKind, Manifest, Value};
+    let mut app = app_with(0);
+    app.options.tab = OptTab::Plugins;
+    let mut manifest: Manifest = toml::from_str(include_str!(
+        "../../../plugins/hydra-youtube/hydra-plugin.toml"
+    ))
+    .unwrap();
+    manifest.settings = [
+        (
+            FieldKind::Text,
+            "Output prefix",
+            Value::Text("Video".into()),
+        ),
+        (FieldKind::Choice, "Quality", Value::Text("Best".into())),
+        (FieldKind::Number, "Maximum results", Value::Number(10.0)),
+        (FieldKind::Radio, "Container", Value::Text("MP4".into())),
+        (FieldKind::Checkbox, "Save subtitles", Value::Bool(true)),
+        (FieldKind::Bool, "Use cookies", Value::Bool(false)),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (kind, label, value))| Field {
+        key: format!("setting{i}"),
+        label: label.into(),
+        kind,
+        default: Some(value),
+        help: None,
+        options: if kind == FieldKind::Radio {
+            vec!["MP4".into(), "WebM".into()]
+        } else {
+            vec!["Best".into(), "720p".into()]
+        },
+    })
+    .collect();
+    app.options
+        .plugins
+        .installed
+        .push(hya_plugin::manager::Installed {
+            grants: manifest.permissions.clone(),
+            manifest,
+            directory: "/plugins/youtube".into(),
+            dev: false,
+            signing: Default::default(),
+            enabled: true,
+            pins: Default::default(),
+            settings: Default::default(),
+            failures: 0,
+            module_sha256: String::new(),
+            previous: None,
+        });
+    let mut h = Harness::new(app, WinKind::Options, Size::new(760.0, 700.0), 1.0, true);
+    let settings = h.app.options.plugins.installed[0].manifest.settings.clone();
+    for (mode, name) in [
+        (crate::model::ThemeMode::Light, "light"),
+        (crate::model::ThemeMode::Dark, "dark"),
+    ] {
+        h.app.cfg.settings.theme_mode = Some(mode);
+        h.app.options.plugins.installed[0].manifest.settings = settings.clone();
+        h.app.options.plugins.error = None;
+        for (label, detail) in [
+            ("plugins-list", None),
+            (
+                "plugins-settings",
+                Some(Detail::Settings("hydra.youtube".into())),
+            ),
+            ("plugins-info", Some(Detail::Info("hydra.youtube".into()))),
+            ("plugins-logs", Some(Detail::Logs("hydra.youtube".into()))),
+        ] {
+            h.app.options.plugins.installed[0].signing = if label == "plugins-info" {
+                hya_plugin::package::Signing::Verified {
+                    fingerprint: "b567c8a9f94ea0a5".into(),
+                }
+            } else {
+                hya_plugin::package::Signing::Unsigned
+            };
+            h.app.options.plugins.detail = detail;
+            h.step(label, &[]);
+            dump(
+                &format!("{label}-{name}"),
+                &h.shown,
+                &h.shown,
+                physical(h.logical, h.scale),
+            );
+        }
+        h.app.options.plugins.installed[0].signing = hya_plugin::package::Signing::Unsigned;
+        h.app.options.plugins.detail = Some(Detail::Info("hydra.youtube".into()));
+        h.step("plugins-info-unsigned", &[]);
+        h.app.options.plugins.detail = None;
+        h.app.options.plugins.review = Some(h.app.options.plugins.installed[0].manifest.clone());
+        h.step("plugins-install-review", &[]);
+        h.app.options.plugins.permission_details = true;
+        h.step("plugins-permission-details", &[]);
+        h.app.options.plugins.permission_details = false;
+        dump(
+            &format!("plugins-review-{name}"),
+            &h.shown,
+            &h.shown,
+            physical(h.logical, h.scale),
+        );
+        h.app.options.plugins.error = Some("The package could not be installed.".into());
+        h.step("plugins-install-error", &[]);
+        h.app.options.plugins.busy = true;
+        h.step("plugins-install-busy", &[]);
+        h.app.options.plugins.busy = false;
+        h.app.options.plugins.review = None;
+        h.app.options.plugins.welcome = Some((
+            "YouTube resolver".into(),
+            "Install yt-dlp and ffmpeg, then choose quality or audio output.".into(),
+        ));
+        h.app.options.plugins.detail = None;
+        h.step("plugins-welcome", &[]);
+        h.app.options.plugins.welcome = None;
+        h.app.options.plugins.detail = Some(Detail::Settings("hydra.youtube".into()));
+        h.app.options.plugins.installed[0].manifest.settings.clear();
+        h.step("plugins-no-settings", &[]);
+        h.assert_clean("plugin settings navigation");
+    }
+}
+
+#[test]
+fn add_url_optional_status_rows_render_without_empty_panels() {
+    for (name, probing, error) in [
+        ("add-url-empty", false, false),
+        ("add-url-reading", true, false),
+        ("add-url-failure", false, true),
+    ] {
+        let mut app = app_with(0);
+        app.add_url.address = "https://example.com/video".into();
+        app.add_url.plugin_probing = probing;
+        app.add_url.stream_probing = probing;
+        app.add_url.metalink_probing = probing;
+        app.add_url.cookies_importing = probing;
+        if error {
+            app.add_url.cookie_note = Some("No browser cookies were found.".into());
+            app.add_url.error = Some("The plugin could not resolve this address.".into());
+        }
+        let mut h = Harness::new(app, WinKind::AddUrl, Size::new(760.0, 300.0), 1.0, true);
+        h.step(name, &[]);
+        h.assert_clean(name);
+    }
+}
+
+#[test]
+fn add_url_keeps_long_extractor_errors_scrollable() {
+    let error = "tool_failed: hydra.youtube: exited with 1: WARNING: [youtube] No title found in player responses; falling back to title from initial data. Other metadata may also be missing\nERROR: [youtube] EKkzbbLYPuI: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp for how to manually pass cookies.";
+    let height = crate::windows::add_url::error_panel_height(error);
+    assert!(height > crate::windows::add_url::error_panel_height("Invalid URL"));
+    assert_eq!(
+        crate::windows::add_url::error_panel_height(&error.repeat(10)),
+        height
+    );
+    for scale in [1.0, 2.0] {
+        let mut app = app_with(0);
+        app.add_url.address = "https://www.youtube.com/watch?v=EKkzbbLYPuI".into();
+        app.add_url.error = Some(error.into());
+        let mut h = Harness::new(
+            app,
+            WinKind::AddUrl,
+            Size::new(760.0, 146.0 + height),
+            scale,
+            true,
+        );
+        h.step("youtube-inspection-error", &[]);
+        dump(
+            "youtube-inspection-error",
+            &h.shown,
+            &h.shown,
+            physical(h.logical, h.scale),
+        );
+        h.app.add_url.error = Some(error.repeat(10));
+        h.step("oversized-inspection-error", &[]);
+        let before_scroll = h.shown.clone();
+        h.step(
+            "scroll-inspection-error",
+            &[
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: iced::Point::new(300.0, 180.0),
+                }),
+                Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+                }),
+            ],
+        );
+        assert_ne!(before_scroll, h.shown);
+        h.assert_clean("YouTube inspection error");
+    }
+}
+
+#[test]
+fn plugin_dialog_fits_short_and_long_media_lists() {
+    for (name, audio_only, entries, subtitles, long_title) in [
+        ("plugin-video-no-subtitles", false, 0, 0, false),
+        ("plugin-audio-no-subtitles", true, 0, 0, false),
+        ("plugin-audio-track-without-video", false, 0, 0, false),
+        ("plugin-long-title-many-subtitles", false, 0, 30, true),
+        ("plugin-single-playlist-item", false, 1, 0, false),
+        ("plugin-large-playlist", true, 50, 0, true),
+    ] {
+        let mut app = app_with(0);
+        app.add_url.address = "https://www.youtube.com/watch?v=example".into();
+        let mut info = crate::plugins::tests::plan();
+        info.preferences.audio_only = audio_only;
+        if name == "plugin-audio-track-without-video" {
+            info.plan
+                .tracks
+                .retain(|track| track.kind != hya_plugin_api::TrackKind::Video);
+        }
+        info.plan
+            .tracks
+            .retain(|track| track.kind != hya_plugin_api::TrackKind::Subtitle);
+        for i in 0..subtitles {
+            let mut subtitle = crate::plugins::tests::plan().plan.tracks.pop().unwrap();
+            subtitle.id = format!("subtitle-{i}");
+            info.plan.tracks.push(subtitle);
+        }
+        if entries > 0 {
+            info.plan.tracks.clear();
+            info.plan.entries = (0..entries)
+                .map(|i| hya_plugin_api::PlaylistEntry {
+                    id: i.to_string(),
+                    url: format!("https://example.com/video/{i}"),
+                    title: Some(format!("Video {i}")),
+                })
+                .collect();
+        }
+        if long_title {
+            info.plan.title =
+                Some("A long YouTube video title with details and descriptions ".repeat(8));
+        }
+        app.add_url.plugin_plan = Some(info);
+        let height = 146.0 + crate::windows::add_url::plugin_panel_height(&app.add_url);
+        assert!(height < 500.0, "{name} should remain a compact dialog");
+        let mut h = Harness::new(app, WinKind::AddUrl, Size::new(760.0, height), 1.0, true);
+        h.step(name, &[]);
+        dump(name, &h.shown, &h.shown, physical(h.logical, h.scale));
+        h.assert_clean(name);
+    }
+}
+
+#[test]
+fn plugin_track_picker_and_subtitles_render() {
+    let mut app = app_with(0);
+    app.add_url.address = "https://example.com/video".into();
+    app.add_url.plugin_plan = Some(crate::plugins::tests::plan());
+    let height = 146.0 + crate::windows::add_url::plugin_panel_height(&app.add_url);
+    let mut h = Harness::new(app, WinKind::AddUrl, Size::new(760.0, height), 1.0, true);
+    h.step("plugin-tracks", &[]);
+    dump(
+        "plugin-tracks",
+        &h.shown,
+        &h.shown,
+        physical(h.logical, h.scale),
+    );
+    h.app
+        .add_url
+        .plugin_plan
+        .as_mut()
+        .unwrap()
+        .preferences
+        .track_ids
+        .push("s".into());
+    h.step("plugin-subtitle-selected", &[]);
+    h.assert_clean("plugin subtitle selection");
+    let info = h.app.add_url.plugin_plan.as_mut().unwrap();
+    info.preferences.audio_only = true;
+    info.preferences.audio_format = Some("mp3".into());
+    let height = 146.0 + crate::windows::add_url::plugin_panel_height(&h.app.add_url);
+    let mut h = Harness::new(h.app, WinKind::AddUrl, Size::new(760.0, height), 1.0, true);
+    h.step("plugin-audio-only", &[]);
+    dump(
+        "plugin-audio-only",
+        &h.shown,
+        &h.shown,
+        physical(h.logical, h.scale),
+    );
+    h.hover("plugin-audio-picker-hover", Point::new(250.0, 224.0));
+    h.assert_clean("plugin audio selection");
+    let info = h.app.add_url.plugin_plan.as_mut().unwrap();
+    info.plan.tracks.clear();
+    info.plan.entries = (1..=5)
+        .map(|i| hya_plugin_api::PlaylistEntry {
+            id: i.to_string(),
+            url: format!("https://example.com/watch?v={i}"),
+            title: Some(format!("Playlist video {i}")),
+        })
+        .collect();
+    let height = 146.0 + crate::windows::add_url::plugin_panel_height(&h.app.add_url);
+    let mut h = Harness::new(h.app, WinKind::AddUrl, Size::new(760.0, height), 1.0, true);
+    h.step("plugin-playlist-selection", &[]);
+    dump(
+        "plugin-playlist-selection",
+        &h.shown,
+        &h.shown,
+        physical(h.logical, h.scale),
+    );
+    h.assert_clean("plugin track selection");
 }

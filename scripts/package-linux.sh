@@ -146,6 +146,8 @@ stage() { # <root> <deb|rpm>
   # and three letters types better for a command run as often as a download.
   ln -sf hydra "$ROOT/usr/bin/hya"
 
+  install -Dm644 packaging/hydra-plugin.xml "$ROOT/usr/share/mime/packages/hydra-plugin.xml"
+
   # Desktop/menu entry (the "desktop icon").
   install -d "$ROOT/usr/share/applications"
   cat > "$ROOT/usr/share/applications/hydra.desktop" <<'EOF'
@@ -154,11 +156,12 @@ Type=Application
 Name=Hydra Download Manager
 GenericName=Download Manager
 Comment=Multi-connection download accelerator
-Exec=hydra-gui
+Exec=hydra-gui %f
 Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
 StartupWMClass=hydra
+MimeType=application/x-hydra-plugin;
 EOF
 
   # Start minimized (to tray) at login. Same basename as the per-user entry
@@ -275,6 +278,7 @@ EOF
     cat > "$ROOT/DEBIAN/$s" <<'EOF'
 #!/bin/sh
 set -e
+if command -v update-mime-database >/dev/null 2>&1; then update-mime-database /usr/share/mime || true; fi
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database -q /usr/share/applications || true
 fi
@@ -323,6 +327,7 @@ rm -rf %{buildroot}
 cp -a $STAGE/. %{buildroot}/
 
 %post
+if command -v update-mime-database >/dev/null 2>&1; then update-mime-database /usr/share/mime || true; fi
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database -q /usr/share/applications || :
 fi
@@ -331,6 +336,7 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 
 %postun
+if command -v update-mime-database >/dev/null 2>&1; then update-mime-database /usr/share/mime || true; fi
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database -q /usr/share/applications || :
 fi
@@ -344,6 +350,7 @@ fi
 /usr/bin/hydra-gui
 /usr/bin/hydra-host
 /usr/share/applications/hydra.desktop
+/usr/share/mime/packages/hydra-plugin.xml
 /usr/share/icons/hicolor/*/apps/hydra.png
 /usr/share/$NAME/extensions/
 /usr/share/doc/$NAME/

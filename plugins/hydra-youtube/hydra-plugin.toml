@@ -1,0 +1,80 @@
+id = "hydra.youtube"
+name = "YouTube Downloader"
+author = "Hydra Team"
+version = "0.1.0"
+api = 1
+module = "plugin.wasm"
+license = "MIT OR Apache-2.0"
+welcome = """Install yt-dlp on PATH, or enable 'Download yt-dlp if it is missing' in this plugin’s settings. Choose an installed JavaScript runtime (Node or Deno) when YouTube requires it. Install ffmpeg on PATH to combine video and audio or extract MP3 audio. Add a YouTube video or playlist URL, then choose quality, audio and subtitles before downloading."""
+hooks = ["resolve", "refresh", "check"]
+claims = ["*://*.youtube.com/watch*", "*://youtube.com/watch*", "*://*.youtube.com/shorts/*", "*://youtube.com/shorts/*", "*://youtu.be/*", "*://*.youtube.com/playlist*", "*://youtube.com/playlist*"]
+
+[permissions]
+http = ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"]
+data = true
+exec_from_data = true
+cookies = ["youtube.com", "*.youtube.com"]
+sources = ["*.googlevideo.com", "*.youtube.com", "youtube.com"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--no-playlist", "-J", "--skip-download", "--", "*"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--version"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--no-playlist", "-J", "--skip-download", "--cookies", "{cookie_file}", "--", "*"]
+
+[[settings]]
+key = "use_cookies"
+label = "Use granted browser cookies"
+type = "bool"
+default = false
+
+[[settings]]
+key = "yt_dlp_path"
+label = "yt-dlp program folder"
+type = "path"
+help = "After changing this folder, grant exec:yt-dlp again to approve and pin the program."
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--no-playlist", "-J", "--skip-download", "--js-runtimes", "*", "--", "*"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--no-playlist", "-J", "--skip-download", "--js-runtimes", "*", "--cookies", "{cookie_file}", "--", "*"]
+
+[[settings]]
+key = "javascript_runtime"
+label = "JavaScript runtime for yt-dlp"
+type = "dropdown"
+options = ["default", "node", "deno"]
+default = "default"
+help = "Choose a runtime installed on your computer. Recent YouTube extractors need one to solve player challenges."
+
+[[settings]]
+key = "download_backend"
+label = "Download yt-dlp if it is missing"
+type = "boolean"
+default = false
+help = "Fetch the pinned official release for your platform, verify its SHA256, and keep it in this plugin's private folder. Existing approved programs are never replaced automatically."
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--yes-playlist", "-J", "--skip-download", "--flat-playlist", "--playlist-end", "512", "--", "*"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--yes-playlist", "-J", "--skip-download", "--flat-playlist", "--playlist-end", "512", "--cookies", "{cookie_file}", "--", "*"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--yes-playlist", "-J", "--skip-download", "--flat-playlist", "--playlist-end", "512", "--js-runtimes", "*", "--", "*"]
+
+[[permissions.exec]]
+program = "yt-dlp"
+args = ["--ignore-config", "--no-plugin-dirs", "--yes-playlist", "-J", "--skip-download", "--flat-playlist", "--playlist-end", "512", "--js-runtimes", "*", "--cookies", "{cookie_file}", "--", "*"]

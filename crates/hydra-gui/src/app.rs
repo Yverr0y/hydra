@@ -315,6 +315,12 @@ impl MenuAction {
 
 #[derive(Clone, Debug, Default)]
 pub struct AddUrlState {
+    pub plugin_plan: Option<crate::plugins::PlanInfo>,
+    pub plugin_of: String,
+    pub plugin_probing: bool,
+    /// A cookie edit invalidates the session used by an in-flight inspection.
+    pub plugin_probe_stale: bool,
+    pub browser_cookies: Option<hya_net::CookieJar>,
     pub address: String,
     pub use_auth: bool,
     pub login: String,
@@ -600,11 +606,13 @@ pub enum OptTab {
     Sites,
     Extensions,
     MediaTools,
+    Plugins,
     Sounds,
 }
 
 #[derive(Debug)]
 pub struct OptionsState {
+    pub plugins: crate::plugins::Page,
     pub tab: OptTab,
     pub draft: crate::model::Settings,
     /// The settings the dialog opened on. OK merges against these — see
@@ -673,6 +681,7 @@ pub struct OptionsState {
 impl Default for OptionsState {
     fn default() -> Self {
         OptionsState {
+            plugins: crate::plugins::Page::default(),
             tab: OptTab::General,
             draft: crate::model::Settings::default(),
             base: crate::model::Settings::default(),
@@ -1215,6 +1224,20 @@ pub enum ConfirmKind {
 
 #[derive(Clone, Debug)]
 pub enum Message {
+    Plugin(crate::plugins::Message),
+    InstallPluginFile(std::path::PathBuf),
+    PluginProbe,
+    PluginAudioOnly(bool),
+    PluginAudioFormat(String),
+    PluginMaxHeight(Option<u32>),
+    PluginPlaylistEntry(String, bool),
+    PluginProbed(
+        String,
+        Box<Result<Option<crate::plugins::PlanInfo>, String>>,
+    ),
+    PluginTrack(hya_plugin_api::TrackKind, String),
+    PluginSubtitle(String, bool),
+    PluginContainer(String),
     Noop,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
@@ -1315,7 +1338,7 @@ pub enum Message {
     /// it while the dialog is open, so pressing OK starts a download that
     /// already carries the session.
     AddrImportCookies,
-    AddrCookiesImported(Box<Result<(String, String), String>>),
+    AddrCookiesImported(Box<Result<crate::engine::ImportedCookies, String>>),
     /// Whether Options' chosen browser can be read, answered off the executor,
     /// tagged with the generation that asked.
     OptCookieChecked(u64, Box<Result<String, String>>),
@@ -2452,6 +2475,7 @@ impl App {
         Task::batch([
             self.open_window(WinKind::Options),
             self.check_cookie_source(),
+            crate::plugins::load(),
         ])
     }
 
@@ -2630,15 +2654,8 @@ impl App {
         }
         let (w, h) = match kind {
             WinKind::Main => unreachable!("handled above"),
-            // Base layout plus the credentials row when "Use authorization"
-            // is on, plus the error/blocked-site line when one is showing —
-            // both add a real row that the fixed base height has no room
-            // for, so the message otherwise runs past the window's bottom.
             WinKind::AddUrl => {
-                // Address row, the authorization tick and its (always drawn)
-                // Login/Password row, the Cookies row, the blank line under
-                // them, inside the dialog padding.
-                let mut h = 162.0;
+                let mut h = 146.0;
                 // The cookie note is a real row, and a store path wraps to two
                 // lines at this width on every platform; one line while probing.
                 if self.add_url.cookies_importing {
@@ -2655,7 +2672,15 @@ impl App {
                             &self.cfg.settings.dont_start_sites,
                         ));
                 if warn {
-                    h += 40.0;
+                    h += self
+                        .add_url
+                        .error
+                        .as_ref()
+                        .or(self.add_url.stream_error.as_ref())
+                        .or(self.add_url.metalink_error.as_ref())
+                        .map_or(40.0, |error| {
+                            crate::windows::add_url::error_panel_height(error)
+                        });
                 }
                 // The stream panel is a BLOCK, not a line: a "Stream" row,
                 // the quality and container pickers, and for a live stream
@@ -2663,6 +2688,7 @@ impl App {
                 // probed manifest pushed its own pickers past the bottom of
                 // the window — the quality list the user is being asked to
                 // choose from was exactly the part that fell off.
+                h += crate::windows::add_url::plugin_panel_height(&self.add_url);
                 h += match &self.add_url.stream {
                     _ if self.add_url.stream_probing => 28.0,
                     // A refusal offers nothing to choose, but the sentence
@@ -2875,6 +2901,14 @@ impl App {
     }
 
     fn close_window(&mut self, kind: WinKind) -> Task<Message> {
+        if kind == WinKind::Options {
+            if let Some(prompt) = self.options.plugins.prompt.take() {
+                let _ = prompt.reply.send(Err(hya_plugin_api::PluginError::new(
+                    hya_plugin_api::ErrorCode::Cancelled,
+                    "plugin prompt closed",
+                )));
+            }
+        }
         if let Some(id) = self.win_of(kind) {
             self.windows.remove(&id);
             window::close(id)
@@ -3237,6 +3271,9 @@ impl App {
             d.disp_progress = 0.0;
         }
         let spec = StartSpec {
+            force_stream: false,
+            plugin_headers: Vec::new(),
+            plugin_plan: d.plugin_plan.clone(),
             id,
             url: d.url.clone(),
             auth: d.auth.clone(),
@@ -3487,6 +3524,7 @@ impl App {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            plugin_plan: None,
             metalink: None,
             name_locked: false,
             proxy: ProxyChoice::default(),
@@ -3621,13 +3659,89 @@ impl App {
         }
     }
 
+    fn add_plugin_playlist(&mut self, info: crate::plugins::PlanInfo) -> Task<Message> {
+        let entries: Vec<_> = info
+            .plan
+            .entries
+            .iter()
+            .filter(|entry| {
+                info.preferences
+                    .playlist_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&entry.id))
+            })
+            .collect();
+        if entries.is_empty() {
+            self.add_url.error = Some(i18n::tr("Select at least one playlist item."));
+            return self.resize_open(WinKind::AddUrl);
+        }
+        let queue = self.cfg.queues.first().map(|queue| queue.name.clone());
+        let mut added = false;
+        for entry in entries {
+            if self
+                .state
+                .downloads
+                .iter()
+                .any(|item| item.url == entry.url)
+            {
+                continue;
+            }
+            let id = self.add_item(entry.url.clone(), None, queue.clone());
+            self.apply_capture_extras(id, self.add_url.capture.clone());
+            let mut preferences = info.preferences.clone();
+            preferences.playlist_ids = None;
+            preferences.track_ids.clear();
+            let pending = crate::plugins::PlanInfo {
+                plugin: info.plugin.clone(),
+                plan: hya_plugin_api::Plan::single(
+                    entry.title.as_deref().unwrap_or(&entry.id),
+                    hya_plugin_api::Track::file(&entry.id, &entry.url),
+                ),
+                preferences,
+            };
+            let name = hya_net::filename::portable(entry.title.as_deref().unwrap_or(&entry.id))
+                .unwrap_or_else(|| entry.id.clone());
+            self.name_new_item(
+                id,
+                format!(
+                    "{name}-{}.{}",
+                    entry.id,
+                    info.preferences.audio_format.as_deref().unwrap_or("mkv")
+                ),
+            );
+            if let Some(item) = self.item_mut(id) {
+                item.plugin_plan = Some(pending);
+            }
+            added = true;
+        }
+        self.add_url = AddUrlState::default();
+        if added {
+            if let Some(queue) = queue {
+                self.set_queue_running(&queue, true);
+            }
+        }
+        self.save_state();
+        self.close_window(WinKind::AddUrl)
+    }
+
     fn add_url_ok(&mut self) -> Task<Message> {
         // What the address IS is still being read; adding it now
         // would download the manifest or the mirror list as a file.
-        if self.add_url.stream_probing || self.add_url.metalink_probing {
+        if self.add_url.stream_probing
+            || self.add_url.metalink_probing
+            || self.add_url.plugin_probing
+        {
             return Task::none();
         }
         let url = self.add_url.address.trim().to_string();
+        if let Some(info) = self
+            .add_url
+            .plugin_plan
+            .clone()
+            .filter(|info| !info.plan.entries.is_empty() && self.add_url.plugin_of == url)
+        {
+            return self.add_plugin_playlist(info);
+        }
         // A mirror list is not a download; it is a list of them. Handled
         // before the URL check because the address may be a local
         // `.meta4` path, which `parse_url` correctly refuses.
@@ -3679,11 +3793,17 @@ impl App {
                     max_seconds: (p.live && minutes > 0).then(|| minutes * 60),
                 }
             });
+        let plugin_name = self
+            .add_url
+            .plugin_plan
+            .as_ref()
+            .filter(|_| self.add_url.plugin_of == url)
+            .map(crate::plugins::file_name);
         let name = match &stream {
             Some(si) => format!("{}.{}", stream_base_name(&url), si.ext()),
-            None => captured
-                .name
+            None => plugin_name
                 .clone()
+                .or_else(|| captured.name.clone())
                 .unwrap_or_else(|| engine::file_name_from_url(&url)),
         };
         let cat = crate::model::categorize(&name, &self.cfg.categories);
@@ -3724,6 +3844,17 @@ impl App {
         }
         let id = self.add_item(url, auth, None);
         self.apply_capture_extras(id, captured);
+        let plugin_plan = self
+            .add_url
+            .plugin_plan
+            .clone()
+            .filter(|_| self.add_url.plugin_of == self.add_url.address.trim());
+        if let Some(info) = plugin_plan {
+            self.name_new_item(id, name.clone());
+            if let Some(d) = self.item_mut(id) {
+                d.plugin_plan = Some(info);
+            }
+        }
         if let Some(si) = stream {
             self.name_new_item(id, name);
             if let Some(d) = self.item_mut(id) {
@@ -3845,6 +3976,9 @@ impl App {
                 let open = self.open_window(WinKind::Batch);
                 let text = urls.join("\n");
                 Task::batch([open, self.update(Message::BatchLoaded(Some(text)))])
+            }
+            crate::extbus::ExtEvent::InstallPlugin(path) => {
+                self.update(Message::InstallPluginFile(path))
             }
             crate::extbus::ExtEvent::Open => self.open_window(WinKind::Main),
             crate::extbus::ExtEvent::TrustRequest(origin) => {
@@ -4710,6 +4844,34 @@ impl App {
 
     fn on_engine(&mut self, ev: engine::Event) -> Task<Message> {
         match ev {
+            engine::Event::PluginPrompt(prompt) => {
+                if let Some(old) = self.options.plugins.prompt.take() {
+                    let _ = old.reply.send(Err(hya_plugin_api::PluginError::new(
+                        hya_plugin_api::ErrorCode::Cancelled,
+                        "another prompt replaced this one",
+                    )));
+                }
+                self.options.plugins.answers = prompt
+                    .form
+                    .fields
+                    .iter()
+                    .filter_map(|f| {
+                        f.default.as_ref().map(|v| {
+                            (
+                                f.key.clone(),
+                                match v {
+                                    hya_plugin_api::Value::Text(s) => s.clone(),
+                                    hya_plugin_api::Value::Bool(v) => v.to_string(),
+                                    hya_plugin_api::Value::Number(v) => v.to_string(),
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+                self.options.plugins.prompt = Some(prompt);
+                self.options.tab = OptTab::Plugins;
+                self.open_window(WinKind::Options)
+            }
             engine::Event::Probed {
                 id,
                 size,
@@ -5837,7 +5999,7 @@ impl App {
                         let t = t.trim();
                         if !t.contains('\n') && looks_downloadable(t, &self.cfg.settings.auto_types)
                         {
-                            self.add_url.address = t.to_string();
+                            return self.update(Message::AddrChanged(t.to_string()));
                         }
                     }
                 }
@@ -5849,13 +6011,19 @@ impl App {
                 // An edited address no longer describes the manifest we
                 // read; showing its quality list would be a lie.
                 let addr = self.add_url.address.trim().to_string();
+                if self.add_url.plugin_of != addr {
+                    self.add_url.plugin_plan = None;
+                    self.add_url.plugin_of.clear();
+                }
                 if self.add_url.stream_of != addr {
                     self.add_url.stream = None;
+                    self.add_url.stream_of.clear();
                     self.add_url.stream_error = None;
                     self.add_url.quality = None;
                 }
                 if self.add_url.metalink_of != addr {
                     self.add_url.metalink = None;
+                    self.add_url.metalink_of.clear();
                     self.add_url.metalink_error = None;
                 }
                 let mut tasks = vec![self.resize_open(WinKind::AddUrl)];
@@ -5870,35 +6038,25 @@ impl App {
                         self.add_url.capture.cookie_source = None;
                         self.add_url.cookie_note = None;
                         self.add_url.cookies_imported = false;
+                        self.add_url.browser_cookies = None;
                     }
                     if !self.cfg.settings.cookies_from_browser.trim().is_empty() && !addr.is_empty()
                     {
                         tasks.push(self.update(Message::AddrImportCookies));
                     }
                 }
-                // A mirror list reads itself for the same reason a manifest
-                // does: it decides how many files are about to be added and
-                // what they will be called, and a user should see that before
-                // pressing OK rather than afterwards.
-                if crate::engine::metalink_address(&addr)
-                    && !self.add_url.metalink_probing
-                    && self.add_url.metalink_of != addr
-                {
-                    tasks.push(self.update(Message::AddrProbeMetalink));
-                } else if manifest_address(&addr)
-                    // Automatic: a manifest address inspects itself, so the
-                    // user is choosing a quality rather than discovering
-                    // afterwards that they could have.
-                    && !self.add_url.stream_probing
-                    && self.add_url.stream_of != addr
-                {
-                    tasks.push(self.update(Message::AddrProbeStream));
+                if !addr.is_empty() && self.add_url.plugin_of != addr {
+                    tasks.push(self.update(Message::PluginProbe));
                 }
                 Task::batch(tasks)
             }
             Message::AddrCookies(v) => {
                 let v = v.trim().to_string();
-                self.add_url.capture.cookies = (!v.is_empty()).then(|| v.clone());
+                let cookies = (!v.is_empty()).then(|| v.clone());
+                let changed = self.add_url.capture.cookies != cookies
+                    || self.add_url.browser_cookies.is_some();
+                self.add_url.capture.cookies = cookies;
+                self.add_url.browser_cookies = None;
                 // Typed beats imported, and says so: the note under the field
                 // would otherwise keep crediting a browser for a value the
                 // user has since replaced.
@@ -5906,7 +6064,12 @@ impl App {
                     (!v.is_empty()).then(|| crate::i18n::tr("typed in the Add URL dialog"));
                 self.add_url.cookie_note = None;
                 self.add_url.cookies_imported = false;
-                Task::none()
+                if changed {
+                    self.add_url.plugin_probe_stale = true;
+                    self.update(Message::PluginProbe)
+                } else {
+                    Task::none()
+                }
             }
             Message::AddrImportCookies => {
                 let url = self.add_url.address.trim().to_string();
@@ -5935,16 +6098,21 @@ impl App {
                     // An empty header means the browser simply holds nothing
                     // for this host. That is an answer, not a failure, and
                     // overwriting a typed value with it would be a loss.
-                    Ok((header, why)) if !header.is_empty() => {
-                        self.add_url.capture.cookies = Some(header);
-                        self.add_url.capture.cookie_source = Some(why.clone());
-                        self.add_url.cookie_note = Some(why);
+                    Ok(import) if !import.header.is_empty() => {
+                        self.add_url.plugin_probe_stale = true;
+                        self.add_url.capture.cookies = Some(import.header);
+                        self.add_url.capture.cookie_source = Some(import.source.clone());
+                        self.add_url.cookie_note = Some(import.source);
                         self.add_url.cookies_imported = true;
+                        self.add_url.browser_cookies = Some(import.jar);
                     }
-                    Ok((_, why)) => self.add_url.cookie_note = Some(why),
+                    Ok(import) => self.add_url.cookie_note = Some(import.source),
                     Err(e) => self.add_url.cookie_note = Some(e),
                 }
-                self.resize_open(WinKind::AddUrl)
+                Task::batch([
+                    self.resize_open(WinKind::AddUrl),
+                    self.update(Message::PluginProbe),
+                ])
             }
             Message::OptCookieChecked(generation, result) => {
                 if generation != self.options.cookie_check_gen {
@@ -6432,9 +6600,151 @@ impl App {
             // and Open / Open folder then act on the file where it now is.
             Message::MoveRename(id) => self.move_rename(id, self.win_of(WinKind::Complete(id))),
 
+            Message::InstallPluginFile(path) => {
+                let open = self.open_options(Some(OptTab::Plugins));
+                if self.options.plugins.busy {
+                    self.options.plugins.pending_file = Some(path);
+                    return open;
+                }
+                self.options.plugins.detail = None;
+                self.options.plugins.prompt = None;
+                self.options.plugins.review = None;
+                self.options.plugins.prepared = None;
+                self.options.plugins.welcome = None;
+                self.options.plugins.path = path.to_string_lossy().into_owned();
+                let review = crate::plugins::update(self, crate::plugins::Message::Review);
+                Task::batch([open, review])
+            }
+            Message::PluginProbe => {
+                if self.add_url.plugin_probe_stale {
+                    self.add_url.plugin_plan = None;
+                    self.add_url.plugin_of.clear();
+                    self.add_url.error = None;
+                }
+                if self.add_url.plugin_probing || self.add_url.cookies_importing {
+                    return Task::none();
+                }
+                let url = self.add_url.address.trim().to_string();
+                if url.is_empty() {
+                    return Task::none();
+                }
+                self.add_url.plugin_probing = true;
+                self.add_url.plugin_probe_stale = false;
+                let referer = self.add_url.capture.referer.clone();
+                let cookies = self.add_url.capture.cookies.clone();
+                let key = url.clone();
+                let browser_cookies = self.add_url.browser_cookies.clone();
+                Task::perform(
+                    crate::plugins::resolve(url, referer, cookies, browser_cookies),
+                    move |r| Message::PluginProbed(key.clone(), Box::new(r)),
+                )
+            }
+            Message::PluginProbed(url, result) => {
+                self.add_url.plugin_probing = false;
+                if self.add_url.address.trim() != url
+                    || self.add_url.plugin_probe_stale
+                    || self.add_url.cookies_importing
+                {
+                    return self.update(Message::PluginProbe);
+                }
+                self.add_url.plugin_of = url.clone();
+                match *result {
+                    Ok(plan) => {
+                        self.add_url.plugin_plan = plan;
+                        self.add_url.error = None;
+                        if self.add_url.plugin_plan.is_none() {
+                            if crate::engine::metalink_address(&url)
+                                && self.add_url.metalink_of != url
+                            {
+                                return self.update(Message::AddrProbeMetalink);
+                            }
+                            if manifest_address(&url) && self.add_url.stream_of != url {
+                                return self.update(Message::AddrProbeStream);
+                            }
+                        }
+                    }
+                    Err(e) => self.add_url.error = Some(e),
+                }
+                self.resize_open(WinKind::AddUrl)
+            }
+            Message::PluginAudioOnly(value) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences.audio_only = value;
+                    if value && info.preferences.audio == hya_plugin_api::AudioPref::None {
+                        info.preferences.audio = hya_plugin_api::AudioPref::Best;
+                    }
+                }
+                self.resize_open(WinKind::AddUrl)
+            }
+            Message::PluginAudioFormat(format) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences.audio_format = (format != "Original").then_some(format);
+                }
+                Task::none()
+            }
+            Message::PluginMaxHeight(height) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences.max_height = height;
+                }
+                Task::none()
+            }
+            Message::PluginPlaylistEntry(id, checked) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    let ids = info.preferences.playlist_ids.get_or_insert_with(|| {
+                        info.plan
+                            .entries
+                            .iter()
+                            .map(|entry| entry.id.clone())
+                            .collect()
+                    });
+                    ids.retain(|entry| entry != &id);
+                    if checked {
+                        ids.push(id);
+                    }
+                }
+                Task::none()
+            }
+            Message::PluginTrack(kind, id) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences
+                        .track_ids
+                        .retain(|id| info.plan.track(id).is_none_or(|t| t.kind != kind));
+                    if id != "Best" && id != "None" {
+                        info.preferences.track_ids.push(id.clone());
+                    }
+                    if kind == hya_plugin_api::TrackKind::Audio {
+                        info.preferences.audio = if id == "None" {
+                            hya_plugin_api::AudioPref::None
+                        } else {
+                            hya_plugin_api::AudioPref::Best
+                        };
+                    }
+                }
+                Task::none()
+            }
+            Message::PluginSubtitle(id, selected) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences.track_ids.retain(|value| value != &id);
+                    if selected {
+                        info.preferences.track_ids.push(id);
+                    }
+                }
+                Task::none()
+            }
+            Message::PluginContainer(value) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    info.preferences.container = Some(value);
+                }
+                Task::none()
+            }
+            Message::Plugin(message) => crate::plugins::update(self, message),
             Message::OptTabSet(t) => {
                 self.options.tab = t;
-                Task::none()
+                if t == OptTab::Plugins {
+                    crate::plugins::load()
+                } else {
+                    Task::none()
+                }
             }
             Message::OptExtStore(url) => {
                 let _ = open::that_detached(url);
@@ -9901,6 +10211,7 @@ mod tests {
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
             stream: None,
+            plugin_plan: None,
             metalink: None,
             name_locked: false,
             proxy: ProxyChoice::default(),
@@ -10003,6 +10314,27 @@ mod tests {
             w >= super::main_min_w(),
             "nonsense is replaced, not restored: {w}"
         );
+    }
+
+    #[test]
+    fn add_url_reserves_bounded_space_for_extractor_diagnostics() {
+        for source in ["plugin", "stream", "metalink"] {
+            let mut app = App::default();
+            let (_, initial_height) = app.window_size(WinKind::AddUrl);
+            let error = "WARNING: No title found in player responses\nERROR: Sign in to confirm you're not a bot. Use browser cookies for authentication. ".repeat(4);
+            match source {
+                "plugin" => app.add_url.error = Some(error),
+                "stream" => app.add_url.stream_error = Some(error),
+                _ => app.add_url.metalink_error = Some(error),
+            }
+            let (_, error_height) = app.window_size(WinKind::AddUrl);
+            assert!(error_height > initial_height + 40.0);
+            assert!(error_height <= initial_height + 120.0);
+        }
+        let mut app = App::default();
+        let (_, initial_height) = app.window_size(WinKind::AddUrl);
+        app.add_url.error = Some("Invalid URL".into());
+        assert_eq!(app.window_size(WinKind::AddUrl).1, initial_height + 40.0);
     }
 
     #[test]
@@ -10303,10 +10635,9 @@ mod tests {
         app.add_url.address = "https://b.test/x".into();
         app.add_url.cookies_of = "https://a.test/x".into();
         app.add_url.cookies_importing = true;
-        let _ = app.update(Message::AddrCookiesImported(Box::new(Ok((
-            "sid=for-a".into(),
-            "firefox — 1 cookie(s) for a.test".into(),
-        )))));
+        let _ = app.update(Message::AddrCookiesImported(Box::new(Ok(
+            imported_cookies("sid=for-a", "firefox — 1 cookie(s) for a.test"),
+        ))));
         assert_eq!(
             app.add_url.capture.cookies, None,
             "a.test's session on b.test"
@@ -12190,6 +12521,34 @@ mod tests {
     /// While the address is still being read as a manifest, OK would add
     /// the manifest itself as a file. It waits.
     #[test]
+    fn add_url_window_shrinks_when_media_controls_are_removed() {
+        let mut app = App::default();
+        let plain = app.window_size(WinKind::AddUrl);
+        assert_eq!(plain, (760.0, 146.0));
+        app.add_url.plugin_probing = true;
+        let probing = app.window_size(WinKind::AddUrl);
+        assert!(probing.1 > plain.1);
+        app.add_url.plugin_probing = false;
+        app.add_url.plugin_plan = Some(crate::plugins::tests::plan());
+        let video = app.window_size(WinKind::AddUrl);
+        assert!(video.1 > probing.1 && video.1 < 400.0);
+        let _ = app.update(Message::PluginAudioOnly(true));
+        let audio = app.window_size(WinKind::AddUrl);
+        assert!(audio.1 < video.1);
+        app.add_url
+            .plugin_plan
+            .as_mut()
+            .unwrap()
+            .plan
+            .tracks
+            .clear();
+        let no_tracks = app.window_size(WinKind::AddUrl);
+        assert!(no_tracks.1 < audio.1);
+        app.add_url.plugin_plan = None;
+        assert_eq!(app.window_size(WinKind::AddUrl), plain);
+    }
+
+    #[test]
     fn add_url_ok_waits_for_a_running_probe() {
         let mut app = App::default();
         app.add_url.address = "https://a.b/live.m3u8".into();
@@ -12200,6 +12559,280 @@ mod tests {
         app.add_url.metalink_probing = true;
         let _ = app.update(Message::AddUrlOk);
         assert!(app.state.downloads.is_empty());
+    }
+
+    #[test]
+    fn opening_a_plugin_package_reviews_permissions_before_installing() {
+        let mut app = App::default();
+        let path = std::path::absolute("youtube.hyaplugin").unwrap();
+        let _ = app.update(Message::InstallPluginFile(path.clone()));
+        assert_eq!(app.options.tab, OptTab::Plugins);
+        assert_eq!(app.options.plugins.path, path.to_string_lossy());
+        assert!(app.options.plugins.busy);
+        assert!(app.options.plugins.review.is_none());
+        assert!(app.options.plugins.installed.is_empty());
+        let queued = std::path::absolute("another.hyaplugin").unwrap();
+        let _ = app.update(Message::InstallPluginFile(queued.clone()));
+        assert_eq!(app.options.plugins.pending_file, Some(queued));
+        assert_eq!(app.options.plugins.path, path.to_string_lossy());
+        let _ = crate::plugins::update(
+            &mut app,
+            crate::plugins::Message::Reviewed(Box::new(Err("old package error".into()))),
+        );
+        assert!(app.options.plugins.pending_file.is_none());
+        assert!(app.options.plugins.error.is_none());
+        assert!(!app.options.plugins.busy);
+    }
+
+    #[test]
+    fn playlist_selection_queues_selected_entries_once_with_audio_preferences() {
+        let mut app = App::default();
+        app.cfg.queues = crate::model::default_queues();
+        let mut info = crate::plugins::tests::plan();
+        info.plan.tracks.clear();
+        info.plan.entries = (1..=2)
+            .map(|index| hya_plugin_api::PlaylistEntry {
+                id: index.to_string(),
+                url: format!("https://example.com/video{index}"),
+                title: Some(format!("Video {index}")),
+            })
+            .collect();
+        app.add_url.address = "https://example.com/playlist".into();
+        app.add_url.plugin_of = app.add_url.address.clone();
+        app.add_url.plugin_plan = Some(info.clone());
+        let _ = app.update(Message::PluginAudioOnly(true));
+        let _ = app.update(Message::PluginAudioFormat("mp3".into()));
+        let _ = app.update(Message::PluginPlaylistEntry("2".into(), false));
+        let _ = app.update(Message::AddUrlOk);
+        assert_eq!(app.state.downloads.len(), 1);
+        let item = &app.state.downloads[0];
+        assert_eq!(item.url, "https://example.com/video1");
+        let plan = item.plugin_plan.as_ref().unwrap();
+        assert!(plan.preferences.audio_only);
+        assert_eq!(plan.preferences.audio_format.as_deref(), Some("mp3"));
+        assert!(plan.preferences.playlist_ids.is_none());
+        assert!(item.queue.is_some());
+        app.add_url.address = "https://example.com/playlist".into();
+        app.add_url.plugin_of = app.add_url.address.clone();
+        app.add_url.plugin_plan = Some(info);
+        let _ = app.update(Message::PluginPlaylistEntry("1".into(), false));
+        let _ = app.update(Message::PluginPlaylistEntry("2".into(), false));
+        let _ = app.update(Message::AddUrlOk);
+        assert!(app.add_url.error.is_some());
+        let _ = app.update(Message::PluginPlaylistEntry("1".into(), true));
+        let _ = app.update(Message::AddUrlOk);
+        assert_eq!(app.state.downloads.len(), 1);
+    }
+
+    fn imported_cookies(header: &str, source: &str) -> crate::engine::ImportedCookies {
+        let mut jar = hya_net::CookieJar::new();
+        jar.add_pairs(header, "www.youtube.com");
+        crate::engine::ImportedCookies {
+            header: header.into(),
+            source: source.into(),
+            jar,
+        }
+    }
+
+    #[test]
+    fn plugin_inspection_waits_for_chrome_cookie_import() {
+        let mut app = App::default();
+        app.cfg.settings.cookies_from_browser = "chrome".into();
+        let url = "https://www.youtube.com/watch?v=example".to_string();
+        let _ = app.update(Message::AddrChanged(url.clone()));
+        assert!(app.add_url.cookies_importing);
+        assert!(!app.add_url.plugin_probing);
+        let _ = app.update(Message::AddrCookiesImported(Box::new(Ok(
+            imported_cookies("session=chrome", "Chrome"),
+        ))));
+        assert!(app.add_url.plugin_probing);
+        assert!(!app.add_url.plugin_probe_stale);
+        assert_eq!(
+            app.add_url.capture.cookies.as_deref(),
+            Some("session=chrome")
+        );
+        assert!(app.add_url.browser_cookies.is_some());
+        let _ = app.update(Message::PluginProbed(url, Box::new(Ok(None))));
+        assert!(!app.add_url.plugin_probing);
+    }
+
+    #[test]
+    fn cookie_edits_discard_inspection_replies_from_the_previous_session() {
+        for cookies in ["session=new", ""] {
+            let mut app = App::default();
+            let url = "https://www.youtube.com/watch?v=example".to_string();
+            app.add_url.capture.cookies = Some("session=old".into());
+            let _ = app.update(Message::AddrChanged(url.clone()));
+            let _ = app.update(Message::AddrCookies(cookies.into()));
+            assert!(app.add_url.browser_cookies.is_none());
+            assert!(app.add_url.plugin_probe_stale);
+            let _ = app.update(Message::PluginProbed(
+                url.clone(),
+                Box::new(Err("Sign in to confirm you're not a bot".into())),
+            ));
+            assert!(app.add_url.error.is_none());
+            assert!(app.add_url.plugin_probing);
+            assert!(!app.add_url.plugin_probe_stale);
+            let _ = app.update(Message::PluginProbed(
+                url,
+                Box::new(Ok(Some(crate::plugins::tests::plan()))),
+            ));
+            assert!(app.add_url.plugin_plan.is_some());
+        }
+    }
+
+    #[test]
+    fn typing_cookies_retries_a_failed_inspection_but_identical_cookies_do_not() {
+        let mut app = App::default();
+        let url = "https://www.youtube.com/watch?v=example".to_string();
+        let _ = app.update(Message::AddrChanged(url.clone()));
+        let _ = app.update(Message::PluginProbed(
+            url.clone(),
+            Box::new(Err("Sign in to confirm you're not a bot".into())),
+        ));
+        let _ = app.update(Message::AddrCookies("session=chrome".into()));
+        assert!(app.add_url.plugin_probing);
+        assert!(app.add_url.error.is_none());
+        let _ = app.update(Message::PluginProbed(
+            url,
+            Box::new(Ok(Some(crate::plugins::tests::plan()))),
+        ));
+        let _ = app.update(Message::AddrCookies("session=chrome".into()));
+        assert!(!app.add_url.plugin_probing);
+        assert!(app.add_url.plugin_plan.is_some());
+    }
+
+    #[test]
+    fn failed_cookie_import_still_allows_public_video_inspection() {
+        for result in [
+            Ok(imported_cookies("", "No cookies")),
+            Err("Browser unavailable".into()),
+        ] {
+            let mut app = App::default();
+            app.cfg.settings.cookies_from_browser = "chrome".into();
+            let _ = app.update(Message::AddrChanged(
+                "https://www.youtube.com/watch?v=example".into(),
+            ));
+            let _ = app.update(Message::AddrCookiesImported(Box::new(result)));
+            assert!(!app.add_url.cookies_importing);
+            assert!(app.add_url.plugin_probing);
+            assert!(app.add_url.capture.cookies.is_none());
+            assert!(app.add_url.cookie_note.is_some());
+        }
+    }
+
+    #[test]
+    fn an_inspection_reply_during_cookie_import_cannot_publish_a_stale_failure() {
+        let mut app = App::default();
+        let url = "https://www.youtube.com/watch?v=example".to_string();
+        let _ = app.update(Message::AddrChanged(url.clone()));
+        app.cfg.settings.cookies_from_browser = "chrome".into();
+        let _ = app.update(Message::AddrImportCookies);
+        let _ = app.update(Message::PluginProbed(
+            url.clone(),
+            Box::new(Err("Sign in to confirm you're not a bot".into())),
+        ));
+        assert!(app.add_url.cookies_importing);
+        assert!(!app.add_url.plugin_probing);
+        assert!(app.add_url.error.is_none());
+        let _ = app.update(Message::AddrCookiesImported(Box::new(Ok(
+            imported_cookies("session=chrome", "Chrome"),
+        ))));
+        assert!(app.add_url.plugin_probing);
+        let _ = app.update(Message::PluginProbed(url, Box::new(Ok(None))));
+        assert!(app.add_url.error.is_none());
+    }
+
+    #[test]
+    fn entering_or_prefilling_a_url_starts_plugin_detection() {
+        for message in [
+            Message::AddrChanged("https://example.com/video.zip".into()),
+            Message::AddrPrefill(Some("https://example.com/video.zip".into())),
+        ] {
+            let mut app = App::default();
+            let _ = app.update(message);
+            assert!(app.add_url.plugin_probing);
+            assert_eq!(app.add_url.address, "https://example.com/video.zip");
+            let _ = app.update(Message::AddUrlOk);
+            assert!(app.state.downloads.is_empty());
+            let _ = app.update(Message::PluginProbed(
+                app.add_url.address.clone(),
+                Box::new(Ok(None)),
+            ));
+            assert!(!app.add_url.plugin_probing);
+            assert!(app.add_url.plugin_plan.is_none());
+            assert_eq!(app.add_url.plugin_of, app.add_url.address);
+        }
+    }
+
+    #[test]
+    fn plugin_detection_discards_stale_results_and_handles_cleared_addresses() {
+        let mut app = App::default();
+        let first = "https://example.com/first".to_string();
+        let second = "https://example.com/second".to_string();
+        let _ = app.update(Message::AddrChanged(first.clone()));
+        let _ = app.update(Message::AddrChanged(second.clone()));
+        let _ = app.update(Message::PluginProbed(
+            first,
+            Box::new(Ok(Some(crate::plugins::tests::plan()))),
+        ));
+        assert!(app.add_url.plugin_probing);
+        assert!(app.add_url.plugin_plan.is_none());
+        let _ = app.update(Message::PluginProbed(
+            second.clone(),
+            Box::new(Ok(Some(crate::plugins::tests::plan()))),
+        ));
+        assert!(!app.add_url.plugin_probing);
+        assert!(app.add_url.plugin_plan.is_some());
+        let _ = app.update(Message::AddrChanged("https://example.com/third".into()));
+        let _ = app.update(Message::AddrChanged(String::new()));
+        let _ = app.update(Message::PluginProbed(
+            "https://example.com/third".into(),
+            Box::new(Err("stale failure".into())),
+        ));
+        assert!(!app.add_url.plugin_probing);
+        assert!(app.add_url.plugin_plan.is_none());
+        assert!(app.add_url.error.is_none());
+    }
+
+    #[test]
+    fn clearing_and_reentering_a_url_repeats_detection() {
+        let mut app = App::default();
+        let url = "https://example.com/video".to_string();
+        let _ = app.update(Message::AddrChanged(url.clone()));
+        let _ = app.update(Message::PluginProbed(
+            url.clone(),
+            Box::new(Ok(Some(crate::plugins::tests::plan()))),
+        ));
+        let _ = app.update(Message::AddrChanged(String::new()));
+        assert!(app.add_url.plugin_plan.is_none());
+        assert!(app.add_url.plugin_of.is_empty());
+        let _ = app.update(Message::AddrChanged(url));
+        assert!(app.add_url.plugin_probing);
+    }
+
+    #[test]
+    fn unclaimed_stream_and_metalink_urls_use_core_detection() {
+        for (url, stream) in [
+            ("https://example.com/video.m3u8", true),
+            ("https://example.com/files.meta4", false),
+        ] {
+            let mut app = App::default();
+            let _ = app.update(Message::AddrChanged(url.into()));
+            let _ = app.update(Message::PluginProbed(url.into(), Box::new(Ok(None))));
+            assert!(!app.add_url.plugin_probing);
+            assert_eq!(app.add_url.stream_probing, stream);
+            assert_eq!(app.add_url.metalink_probing, !stream);
+            app.add_url.stream_probing = false;
+            app.add_url.metalink_probing = false;
+            app.add_url.stream_of = url.into();
+            app.add_url.metalink_of = url.into();
+            let _ = app.update(Message::AddrChanged(String::new()));
+            let _ = app.update(Message::AddrChanged(url.into()));
+            let _ = app.update(Message::PluginProbed(url.into(), Box::new(Ok(None))));
+            assert_eq!(app.add_url.stream_probing, stream);
+            assert_eq!(app.add_url.metalink_probing, !stream);
+        }
     }
 
     /// The browser was told `ok: false` when the receipt timed out, so it

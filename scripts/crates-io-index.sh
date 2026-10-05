@@ -105,7 +105,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 
   status=0
   printf '%-10s %-12s %-12s %s\n' CRATE MANIFEST REGISTRY STATUS
-  for crate in hya-core hya-net hya-stream; do
+  for crate in hya-core hya-net hya-stream hya-plugin-api hya-plugin-sdk hya-plugin; do
     version=$(crate_version "$crate")
     latest=$(latest_indexed_version "$crate")
     if [ -z "$latest" ]; then

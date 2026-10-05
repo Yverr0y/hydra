@@ -4,6 +4,9 @@
 |---|---|---|
 | `hydra-cli` (the `hydra` binary) | `GPL-3.0-or-later` | The product surface. Copyleft here means a modified hydra distributed to users must ship its source. |
 | `hydra-core` | `MIT OR Apache-2.0` | An I/O-free scheduler built to be depended on. |
+| `hya-plugin-api`, `hya-plugin-sdk` | `MIT OR Apache-2.0` | Shared contracts and guest SDKs for independently licensed plugins. |
+| `hya-plugin` | `MIT OR Apache-2.0` | Embeddable host, with no GPL application dependencies. |
+| `hya-plugin-cli` | `MIT OR Apache-2.0` | Standalone authoring tools and bundled SDK sources. |
 | `hya-net` | `MIT OR Apache-2.0` | Transport, same reasoning. |
 | `hya-ffi` (`libhydra`) | `MIT OR Apache-2.0` | The embeddable C ABI. Its entire purpose is being linked into somebody else's application. |
 

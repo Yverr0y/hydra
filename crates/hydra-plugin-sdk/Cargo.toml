@@ -1,0 +1,18 @@
+[package]
+name = "hya-plugin-sdk"
+version = "0.1.0"
+edition.workspace = true
+readme = "README.md"
+publish = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Rust guest SDK for Hydra Wasm resolver plugins"
+
+[dependencies]
+hya-plugin-api = { version = "0.1.0", path = "../hydra-plugin-api" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

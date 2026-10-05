@@ -106,6 +106,8 @@ pub struct ConnLine {
 
 #[derive(Clone)]
 pub struct Job {
+    pub force_stream: bool,
+    pub plugin_options: Option<crate::plugins::Options>,
     /// Where to send live progress, and the id to tag it with.
     pub ticks: Option<(u64, tokio::sync::mpsc::UnboundedSender<Tick>)>,
     pub urls: Vec<String>,
@@ -1074,6 +1076,9 @@ impl Job {
             headers.push(line);
         }
         Ok(Job {
+            force_stream: false,
+            plugin_options: (!args.no_plugins && crate::plain_download_conflict(args).is_none())
+                .then(|| crate::plugins::Options::from_cli(args)),
             ticks: None,
             cookies,
             urls,
@@ -1151,6 +1156,8 @@ impl Job {
 /// A Job with every option at its default, for callers that only need one or two set.
 pub fn default_job() -> Job {
     Job {
+        force_stream: false,
+        plugin_options: None,
         ticks: None,
         cookies: None,
         urls: Vec::new(),
@@ -1400,6 +1407,7 @@ async fn probe_resolving<C>(
     now: u64,
     policy: &ProxyPolicy,
     probe_secs: f64,
+    force_stream: bool,
 ) -> Result<Resolved, String>
 where
     C: hya_net::Connector,
@@ -1436,7 +1444,14 @@ where
         // HEAD, then a ranged GET when it gives nothing usable — see
         // [`hya_net::probe_resilient`], which is also what the GUI and the engine
         // ask, so the three cannot drift apart on which servers they can read.
-        let pr = within(probe_secs, "probe", probe_resilient(c, &target)).await?;
+        let probe = async {
+            if force_stream {
+                hya_net::probe(c, &target).await
+            } else {
+                probe_resilient(c, &target).await
+            }
+        };
+        let pr = within(probe_secs, "probe", probe).await?;
         // Counted, never quoted: the value is a bearer credential and `-v` is
         // read in terminals, CI logs and bug reports.
         let set = jar.store_response(&pr.raw_head, &current.host, &current.path, now);
@@ -1629,6 +1644,7 @@ async fn probe_all(
     let max_redirs = job.max_redirs;
     let policy = job.proxy_policy();
     let probe_secs = job.probe_timeout_s();
+    let force_stream = job.force_stream;
     // Concurrent: in series, a twelve-mirror Fedora document cost 14.4 s of
     // HEADs before the first byte. See `hya_net::PROBE_FANOUT` for the bound.
     let gate = Arc::new(tokio::sync::Semaphore::new(hya_net::PROBE_FANOUT));
@@ -1652,6 +1668,7 @@ async fn probe_all(
                 now,
                 &policy,
                 probe_secs,
+                force_stream,
             )
             .await;
             drop(permit);
@@ -2703,6 +2720,44 @@ fn resume_offer(
 }
 
 pub async fn run(job: Job) -> Outcome {
+    if job.plugin_options.is_some() && job.urls.len() == 1 {
+        match crate::plugins::resolve_job(&job).await {
+            Ok(Some((id, plan))) => {
+                let preferences = job
+                    .plugin_options
+                    .as_ref()
+                    .map(|o| o.preferences.clone())
+                    .unwrap_or_default();
+                if !plan.entries.is_empty() {
+                    return match crate::plan::run_playlist(plan, job.clone(), preferences, &id)
+                        .await
+                    {
+                        Ok(out) => out,
+                        Err(error) => failed(&job, 0, format!("plugin {id}: {error}")),
+                    };
+                }
+                return match crate::plan::run(plan, job.clone(), preferences, &id).await {
+                    Ok(out) => out,
+                    Err(error) => failed(&job, 0, format!("plugin {id}: {error}")),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => return failed(&job, 0, error),
+        }
+    }
+    let mut outcome = run_file(job.clone()).await;
+    if outcome.ok && job.plugin_options.is_some() && !job.to_stdout {
+        if let Err(error) =
+            crate::plugins::finish_job(outcome.url.clone(), outcome.output.clone().into()).await
+        {
+            return failed(&job, outcome.size, error);
+        }
+        outcome.size = std::fs::metadata(&outcome.output).map_or(outcome.size, |m| m.len());
+    }
+    outcome
+}
+
+pub async fn run_file(job: Job) -> Outcome {
     match phases(&job).await {
         Ok(o) => o,
         Err(early) => *early,
@@ -3032,7 +3087,7 @@ async fn prepare(job: &Job) -> Result<Prepared, Box<Outcome>> {
     // unknown-size streaming path, and came out as "the server sent no body" —
     // exit code 1 over a correctly written empty file.
     let empty_object = probe_info.stated_length() == Some(0);
-    if size == 0 && !job.spider && !empty_object {
+    if size == 0 && !job.spider && !empty_object && !job.force_stream {
         // `keep` holds the indices that probed consistently; any of them can answer.
         match hya_net::probe_size_via_range(conn.as_ref(), &pairs[keep[0]].1).await {
             Ok(n) if n > 0 => {
@@ -3043,7 +3098,7 @@ async fn prepare(job: &Job) -> Result<Prepared, Box<Outcome>> {
             Err(e) => p.event(1, &format!("size fallback failed: {e}")),
         }
     }
-    if size == 0 && !job.spider {
+    if (size == 0 || job.force_stream) && !job.spider {
         if job.server_response {
             p.end_phase();
             print_exchange(&probe_info);
@@ -5120,6 +5175,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await
         .expect("the chain resolves");
@@ -5176,6 +5232,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await
         .expect("the chain resolves");
@@ -5227,6 +5284,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await
         .expect("the page forwards");
@@ -5275,6 +5333,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await;
         let err = match r {
@@ -5505,6 +5564,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await
         {
@@ -5544,6 +5604,7 @@ mod tests {
             0,
             &no_proxy(),
             30.0,
+            false,
         )
         .await
         {
@@ -5736,6 +5797,8 @@ mod tests {
     struct OriginOpts {
         /// Ignore `Range` and answer `200` without `Accept-Ranges`.
         no_ranges: bool,
+        /// Reject any request with a Range header.
+        reject_ranges: bool,
         /// Answer chunked, with no `Content-Length` anywhere.
         chunked: bool,
         /// Sleep this long between 16 KiB blocks of body.
@@ -5782,6 +5845,16 @@ mod tests {
                         head.drain(..end);
                         let method = text.split_whitespace().next().unwrap_or("").to_string();
                         let has = |line: &str| text.lines().any(|l| l == line);
+                        if opts.reject_ranges
+                            && text
+                                .lines()
+                                .any(|l| l.to_ascii_lowercase().starts_with("range:"))
+                        {
+                            let _ = s
+                                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                                .await;
+                            return;
+                        }
                         let refusal = match (opts.require_auth, opts.require_proxy_auth) {
                             (Some(a), _) if !has(a) => Some("401 Unauthorized"),
                             (_, Some(a)) if !has(a) => Some("407 Proxy Authentication Required"),
@@ -5856,6 +5929,12 @@ mod tests {
                         if opts.chunked && s.write_all(b"0\r\n\r\n").await.is_err() {
                             return;
                         }
+                        if text
+                            .lines()
+                            .any(|line| line.eq_ignore_ascii_case("connection: close"))
+                        {
+                            return;
+                        }
                     }
                 });
             }
@@ -5879,6 +5958,32 @@ mod tests {
         job.output = out;
         job.no_proxy = true;
         job
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plugin_range_denial_never_sends_range_even_for_unknown_size() {
+        for chunked in [false, true] {
+            let body = patterned(100_003);
+            let (port, gets) = spawn_origin(
+                body.clone(),
+                OriginOpts {
+                    reject_ranges: true,
+                    chunked,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let dir = scratch_dir("plugin_no_ranges");
+            let out = dir.join("obj.bin");
+            let mut job = job_at(port, "/obj.bin", Some(out.clone()));
+            job.force_stream = true;
+            job.conns = Some(8);
+            let result = run_file(job).await;
+            assert!(result.ok, "{:?}", result.note);
+            assert_eq!(std::fs::read(&out).unwrap(), *body);
+            assert_eq!(gets.load(std::sync::atomic::Ordering::Relaxed), 1);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// The reported failure: `-x 4` against a server that ignores `Range`

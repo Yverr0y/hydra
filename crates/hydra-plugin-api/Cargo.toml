@@ -1,0 +1,22 @@
+[package]
+name = "hya-plugin-api"
+version = "0.1.0"
+edition.workspace = true
+readme = "README.md"
+publish = true
+# MIT OR Apache-2.0 like hya-core and hya-net: a plugin author linking these
+# types must not be forced to GPL. Never depend on hya-cli, hya-gui, hya-host
+# or hya-updater. See LICENSING.md.
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Plugin contract for the hydra download manager: plan, manifest, form, errors, limits, selection"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

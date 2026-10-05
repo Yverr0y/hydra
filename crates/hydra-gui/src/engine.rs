@@ -16,6 +16,8 @@
 //! `run_transfer_cancellable`'s stop flag so sockets actually close, and the
 //! received spans are re-`mark_done`d on resume — including across app restarts.
 
+mod plugin;
+
 use crate::model::{ConnRow, DlId};
 use crate::proxy::Route;
 use hya_core::{Capability, Scheduler, Source};
@@ -28,6 +30,9 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Clone, Debug)]
 pub struct StartSpec {
+    pub force_stream: bool,
+    pub plugin_headers: Vec<String>,
+    pub plugin_plan: Option<crate::plugins::PlanInfo>,
     pub id: DlId,
     pub url: String,
     pub auth: Option<(String, String)>,
@@ -98,6 +103,9 @@ impl StartSpec {
     #[cfg(test)]
     pub fn plain() -> Self {
         StartSpec {
+            force_stream: false,
+            plugin_headers: Vec::new(),
+            plugin_plan: None,
             id: 0,
             url: String::new(),
             auth: None,
@@ -203,6 +211,7 @@ impl std::fmt::Display for StreamQuality {
 
 #[derive(Debug)]
 pub enum Cmd {
+    PluginPrompt(crate::plugins::Prompt),
     Start(Box<StartSpec>),
     /// Assemble an HLS stream into one file (see [`StreamSpec`]).
     StartStream(Box<StreamSpec>),
@@ -227,6 +236,7 @@ pub enum Cmd {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    PluginPrompt(crate::plugins::Prompt),
     Probed {
         id: DlId,
         size: Option<u64>,
@@ -440,6 +450,9 @@ fn spawn_engine() -> UnboundedSender<Cmd> {
                 let mut live: HashMap<DlId, Live> = HashMap::new();
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        Cmd::PluginPrompt(prompt) => {
+                            let _ = ev_tx.send(Event::PluginPrompt(prompt));
+                        }
                         Cmd::Start(spec) => {
                             let cancel = Arc::new(AtomicBool::new(false));
                             // 0 = unlimited. Both limiters are handed to
@@ -1189,7 +1202,7 @@ pub async fn check_cookie_source(spec: String) -> Result<String, String> {
 /// Off the UI thread, deliberately. On macOS the key lives in the Keychain and
 /// asking for it can put a system dialog in front of the user; doing that from
 /// the update loop would freeze the window behind it.
-pub async fn import_cookies(spec: String, url: String) -> Result<(String, String), String> {
+pub(crate) async fn import_cookies(spec: String, url: String) -> Result<ImportedCookies, String> {
     let source: hya_net::cookies::browser::Source = spec.parse().map_err(|e| format!("{e}"))?;
     let u = crate::engine::parse_url(&url)?;
     tokio::task::spawn_blocking(move || {
@@ -1216,10 +1229,22 @@ pub async fn import_cookies(spec: String, url: String) -> Result<(String, String
                 import.undecryptable
             ));
         }
-        Ok((header, why))
+        Ok(ImportedCookies {
+            header,
+            source: why,
+            jar: import.jar,
+        })
     })
     .await
     .map_err(|e| format!("cookie import did not finish: {e}"))?
+}
+
+/// Imported browser cookies retain their scope for external metadata resolvers.
+#[derive(Clone, Debug)]
+pub(crate) struct ImportedCookies {
+    pub header: String,
+    pub source: String,
+    pub jar: hya_net::CookieJar,
 }
 
 /// The request headers a download's credentials turn into: HTTP Basic for a
@@ -1252,11 +1277,12 @@ pub fn request_headers(
 /// that were typed for that one, and every target a transfer sends is built
 /// here, so no path can keep the credentials that another drops.
 fn target_for(u: &ParsedUrl, spec: &StartSpec, route: &Route, first: &Target) -> Target {
-    let headers = request_headers(
+    let mut headers = request_headers(
         spec.auth.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
         spec.cookies.as_deref(),
         spec.referer.as_deref(),
     );
+    headers.extend(spec.plugin_headers.clone());
     target_via(route.http(), u, Vec::new(), &spec.user_agent).with_headers_from(
         first,
         headers,
@@ -1908,7 +1934,14 @@ async fn resolve_primary(
         // against an origin that accepts a request and then says nothing, the
         // row sat in "Connecting..." and Stop All left it there, still holding
         // its socket. Dropping the probe future is what closes that socket.
-        let answer = match cancellable(probe_resilient(connector.as_ref(), &t), cancel).await {
+        let probe = async {
+            if spec.force_stream {
+                hya_net::probe(connector.as_ref(), &t).await
+            } else {
+                probe_resilient(connector.as_ref(), &t).await
+            }
+        };
+        let answer = match cancellable(probe, cancel).await {
             Some(a) => a,
             None => {
                 ev(Event::Stopped {
@@ -2145,6 +2178,29 @@ async fn follow_metalink_hop(
 }
 
 async fn run_download(
+    spec: StartSpec,
+    cancel: Arc<AtomicBool>,
+    pace: Pace,
+    final_path: Arc<Mutex<String>>,
+    tx: UnboundedSender<Event>,
+) {
+    let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = async {
+        if !plugin::run(&spec, &cancel, &pace, &final_path, &events).await {
+            run_file_download(
+                spec.clone(),
+                cancel.clone(),
+                pace.clone(),
+                final_path.clone(),
+                events.clone(),
+            )
+            .await;
+        }
+    };
+    plugin::with_hooks(&spec, &cancel, &final_path, &tx, task, rx).await;
+}
+
+async fn run_file_download(
     mut spec: StartSpec,
     cancel: Arc<AtomicBool>,
     pace: Pace,
@@ -2274,7 +2330,7 @@ async fn run_download(
         // Re-enter with the document's sources in hand. Boxed because this
         // is a recursive `async fn` and its future would otherwise have to
         // contain itself.
-        return Box::pin(run_download(spec, cancel, pace, final_path, tx)).await;
+        return Box::pin(run_file_download(spec, cancel, pace, final_path, tx)).await;
     }
 
     // An answer is not a file. `status < 300` lets through the whole of 2xx,
@@ -2328,7 +2384,7 @@ async fn run_download(
         ensure_writable_dir(dir);
     }
 
-    let Some(size) = known_size.filter(|_| p.ranges) else {
+    let Some(size) = known_size.filter(|_| p.ranges && !spec.force_stream) else {
         crate::log::info(&format!(
             "#{id} no range support / unknown size: single stream"
         ));
@@ -5655,7 +5711,7 @@ fn finish_container(
     result
 }
 
-async fn run_stream(
+async fn run_stream_direct(
     spec: StreamSpec,
     cancel: Arc<AtomicBool>,
     pace: Pace,
@@ -8528,4 +8584,44 @@ mod probe_link_tests {
         assert_eq!(conns_for_size(8 * 256 * 1024), 8);
         assert_eq!(8usize.clamp(1, 32).min(conns_for_size(u64::MAX)), 8);
     }
+}
+
+async fn run_stream(
+    spec: StreamSpec,
+    cancel: Arc<AtomicBool>,
+    pace: Pace,
+    final_path: Arc<Mutex<String>>,
+    tx: UnboundedSender<Event>,
+) {
+    let direct = StartSpec {
+        id: spec.id,
+        url: spec.manifest.clone(),
+        auth: None,
+        conns: spec.conns,
+        user_agent: spec.user_agent.clone(),
+        temp_path: spec.temp_path.clone(),
+        final_path: spec.final_path.clone(),
+        held: Vec::new(),
+        expected_size: None,
+        cookies: spec.cookies.clone(),
+        referer: spec.referer.clone(),
+        limit: None,
+        adaptive: false,
+        remote_time: false,
+        mirrors: Vec::new(),
+        attested_size: None,
+        attested_digest: None,
+        pieces: None,
+        proxy: spec.proxy.clone(),
+        force_stream: false,
+        plugin_headers: Vec::new(),
+        plugin_plan: None,
+    };
+    let (events, rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = async {
+        if !plugin::run(&direct, &cancel, &pace, &final_path, &events).await {
+            run_stream_direct(spec, cancel.clone(), pace, final_path.clone(), events).await;
+        }
+    };
+    plugin::with_hooks(&direct, &cancel, &final_path, &tx, task, rx).await;
 }

@@ -26,6 +26,8 @@ mod log;
 #[cfg(target_os = "macos")]
 mod macos_dock;
 #[cfg(target_os = "macos")]
+mod macos_files;
+#[cfg(target_os = "macos")]
 mod macos_menu;
 #[cfg(target_os = "macos")]
 mod macos_surface;
@@ -33,6 +35,7 @@ mod menubus;
 mod model;
 mod nmhost;
 mod picker;
+mod plugins;
 mod proxy;
 #[cfg(test)]
 mod render_check;
@@ -74,6 +77,45 @@ fn config_dir_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Pa
     Ok(None)
 }
 
+fn plugin_file_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<PathBuf>, String> {
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--config" {
+            args.next();
+            continue;
+        }
+        if arg.to_str().is_some_and(|arg| arg.starts_with("--config=")) {
+            continue;
+        }
+        let path = if arg == "--install-plugin" {
+            PathBuf::from(
+                args.next()
+                    .filter(|arg| !arg.is_empty())
+                    .ok_or("--install-plugin needs a package file")?,
+            )
+        } else {
+            let path = PathBuf::from(arg);
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("hyaplugin"))
+            {
+                continue;
+            }
+            path
+        };
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("hyaplugin"))
+        {
+            return Err("plugin packages must use the .hyaplugin extension".into());
+        }
+        return std::path::absolute(path)
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    Ok(None)
+}
+
 /// Make `dir` usable as the application directory: absolute (the login item
 /// and the update finisher relaunch this process from an unrelated working
 /// directory, so a relative `./profile` has to be pinned down now) and
@@ -108,7 +150,14 @@ fn main() -> iced::Result {
     // Single instance: two would fight over state.redb, the tray and
     // ipc.json, so a running one gets the spotlight and this one leaves.
     let minimized = std::env::args().any(|a| a == "--minimized");
-    if extbus::signal_existing(minimized) {
+    let plugin_file = match plugin_file_arg(std::env::args_os()) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("hydra-gui: {error}");
+            std::process::exit(2);
+        }
+    };
+    if extbus::signal_existing(minimized, plugin_file.as_deref()) {
         return Ok(());
     }
 
@@ -158,6 +207,8 @@ fn boot() -> (App, Task<Message>) {
     // the native-messaging host on a loopback socket (port in ipc.json).
     extbus::publish_config(&cfg);
     extbus::start();
+    #[cfg(target_os = "macos")]
+    macos_files::install();
     // Register the native-messaging host with every installed browser, so a
     // fresh install works without anyone running the shell script.
     nmhost::ensure_registered(cfg.settings.portable_capture);
@@ -236,12 +287,17 @@ fn boot() -> (App, Task<Message>) {
     } else {
         Task::none()
     };
+    let install = plugin_file_arg(std::env::args_os())
+        .ok()
+        .flatten()
+        .map(|path| app.update(Message::InstallPluginFile(path)))
+        .unwrap_or_else(Task::none);
     if start_hidden {
-        (app, check)
+        (app, Task::batch([check, install]))
     } else {
         let open_main = app.open_window(WinKind::Main);
         let perm = app.check_folder_access();
-        (app, Task::batch([open_main, perm, check]))
+        (app, Task::batch([open_main, perm, check, install]))
     }
 }
 
@@ -487,12 +543,40 @@ fn native_menu_events() -> impl iced::futures::Stream<Item = String> {
 
 #[cfg(test)]
 mod tests {
-    use super::config_dir_arg;
+    use super::{config_dir_arg, plugin_file_arg};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
     fn parse(argv: &[&str]) -> Result<Option<PathBuf>, String> {
         config_dir_arg(argv.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn plugin_file_arguments_preserve_spaces_and_skip_profile_arguments() {
+        let parse = |args: &[&str]| plugin_file_arg(args.iter().map(OsString::from));
+        assert!(parse(&["hydra", "--config=profile.hyaplugin"])
+            .unwrap()
+            .is_none());
+        let package = std::path::absolute("some folder/youtube.HYAPLUGIN").unwrap();
+        assert_eq!(
+            parse(&[
+                "hydra-gui",
+                "--install-plugin",
+                "some folder/youtube.HYAPLUGIN"
+            ])
+            .unwrap(),
+            Some(package.clone())
+        );
+        assert_eq!(
+            parse(&["hydra-gui", "some folder/youtube.HYAPLUGIN"]).unwrap(),
+            Some(package)
+        );
+        assert_eq!(
+            parse(&["hydra-gui", "--config", "profile.hyaplugin"]).unwrap(),
+            None
+        );
+        assert!(parse(&["hydra-gui", "--install-plugin"]).is_err());
+        assert!(parse(&["hydra-gui", "--install-plugin", "file.txt"]).is_err());
     }
 
     #[test]

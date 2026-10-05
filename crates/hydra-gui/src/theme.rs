@@ -10,7 +10,10 @@
 //! the same widgets without a second style set.
 
 use crate::model::ThemeMode;
-use iced::widget::{button, checkbox, container, pick_list, progress_bar, text_editor, text_input};
+use iced::widget::{
+    button, checkbox, container, pick_list, progress_bar, radio as radio_widget, text_editor,
+    text_input,
+};
 use iced::{Background, Border, Color, Theme};
 
 /// The text size the whole layout is written against: every `.size(...)` in
@@ -441,6 +444,10 @@ pub fn btn_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Sty
 /// cannot be stored.
 pub const ERROR_RED: u32 = 0xC02B2B;
 
+pub fn success_text() -> Color {
+    c(PROGRESS_GREEN)
+}
+
 pub fn error_text() -> Color {
     c(ERROR_RED)
 }
@@ -555,6 +562,25 @@ pub fn check(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
     }
 }
 
+pub fn radio(theme: &Theme, status: radio_widget::Status) -> radio_widget::Style {
+    let status = match status {
+        radio_widget::Status::Active { is_selected } => checkbox::Status::Active {
+            is_checked: is_selected,
+        },
+        radio_widget::Status::Hovered { is_selected } => checkbox::Status::Hovered {
+            is_checked: is_selected,
+        },
+    };
+    let check = check(theme, status);
+    radio_widget::Style {
+        background: Background::Color(surface(theme)),
+        dot_color: check.border.color,
+        border_width: check.border.width,
+        border_color: check.border.color,
+        text_color: check.text_color,
+    }
+}
+
 pub fn progress(theme: &Theme) -> progress_bar::Style {
     progress_bar::Style {
         background: Background::Color(if is_dark(theme) {
@@ -621,6 +647,29 @@ pub fn picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
             1.0,
             2.0,
         ),
+    }
+}
+
+pub fn picker_menu(theme: &Theme) -> iced::widget::overlay::menu::Style {
+    iced::widget::overlay::menu::Style {
+        background: Background::Color(surface(theme)),
+        border: border(
+            if is_dark(theme) {
+                c(0x5A5A5A)
+            } else {
+                c(0xADADAD)
+            },
+            1.0,
+            2.0,
+        ),
+        text_color: text_color(theme),
+        selected_text_color: text_color(theme),
+        selected_background: Background::Color(if is_dark(theme) {
+            c(SELECT_BG_DARK)
+        } else {
+            c(SELECT_BG)
+        }),
+        shadow: Default::default(),
     }
 }
 

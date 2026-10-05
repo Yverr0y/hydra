@@ -1,0 +1,31 @@
+[package]
+name = "hya-plugin-cli"
+version.workspace = true
+edition.workspace = true
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+include = ["src/**", "build.rs", "Cargo.toml", "README.md", "assets/**", "tests/**"]
+description = "Scaffold, build and validate Hydra Wasm plugins"
+publish = false
+
+[[bin]]
+name = "hydra-plugin"
+path = "src/main.rs"
+[dependencies]
+base64 = "0.22"
+semver = "1"
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml = "0.8"
+hya-plugin = { version = "0.1.0", path = "../hydra-plugin" }
+hya-plugin-api = { version = "0.1.0", path = "../hydra-plugin-api" }
+tempfile = "3"
+minisign = "0.9.1"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+[dev-dependencies]
+wat = "1"
+[lints]
+workspace = true

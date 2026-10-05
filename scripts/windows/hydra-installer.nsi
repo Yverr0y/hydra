@@ -207,6 +207,11 @@ instdir_ok:
   CreateShortcut "$SMPROGRAMS\Hydra\Uninstall ${APP_NAME}.lnk" \
     "$INSTDIR\uninstall.exe"
 
+  WriteRegStr HKCU "Software\Classes\.hyaplugin" "" "Hydra.PluginPackage"
+  WriteRegStr HKCU "Software\Classes\Hydra.PluginPackage" "" "Hydra Plugin Package"
+  WriteRegStr HKCU "Software\Classes\Hydra.PluginPackage\DefaultIcon" "" "$INSTDIR\hydra.ico"
+  WriteRegStr HKCU "Software\Classes\Hydra.PluginPackage\shell\open\command" "" '$\"$INSTDIR\hydra-gui.exe$\" --install-plugin $\"%1$\"'
+
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; Add/Remove Programs entry (HKCU to match the per-user install).
@@ -567,6 +572,12 @@ removed:
 
   ; Only when the files are actually gone: an entry removed over a directory
   ; that is still there takes the only offer of a retry with it.
-  IfFileExists "$INSTDIR\hydra-gui.exe" +2
+  IfFileExists "$INSTDIR\hydra-gui.exe" uninstall_registry_kept
+  DeleteRegKey HKCU "Software\Classes\Hydra.PluginPackage"
+  ReadRegStr $0 HKCU "Software\Classes\.hyaplugin" ""
+  ${If} $0 == "Hydra.PluginPackage"
+    DeleteRegValue HKCU "Software\Classes\.hyaplugin" ""
+  ${EndIf}
   DeleteRegKey HKCU "${UNINST_KEY}"
+  uninstall_registry_kept:
 SectionEnd
