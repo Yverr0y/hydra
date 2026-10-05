@@ -1,6 +1,7 @@
 # Hydra — build and packaging entry points.
 #
-#   make build      release build of CLI + GUI + IPC host (any OS)
+#   make build      release build of CLI + GUI + IPC host + plugin CLI (any OS)
+#   make plugin-cli build the hydra-plugin authoring tool
 #   make app        macOS .app bundle (target/release/Hydra Download Manager.app)
 #   make dmg        macOS disk image                      -> target/dist/*.dmg
 #   make deb        Debian/Ubuntu package                 -> target/dist/*.deb
@@ -35,7 +36,7 @@ VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 PROFILE ?= release
 CARGO   ?= cargo
 
-.PHONY: all audit build cli gui host app dmg deb rpm linux appimage flatpak windows \
+.PHONY: all audit build cli gui host plugin-cli app dmg deb rpm linux appimage flatpak windows \
         windows-portable package clean \
         extensions \
         require-macos require-linux ffi header header-check ffi-compat \
@@ -44,7 +45,7 @@ CARGO   ?= cargo
 all: build
 
 build:
-	$(CARGO) build --profile $(PROFILE) -p hya-cli -p hya-gui -p hya-host
+	$(CARGO) build --profile $(PROFILE) -p hya-cli -p hya-gui -p hya-host -p hya-plugin-cli
 
 cli:
 	$(CARGO) build --profile $(PROFILE) -p hya-cli
@@ -54,6 +55,9 @@ gui:
 
 host:
 	$(CARGO) build --profile $(PROFILE) -p hya-host
+
+plugin-cli:
+	$(CARGO) build --profile $(PROFILE) -p hya-plugin-cli
 
 # The browser extensions, in both shapes every packaging target ships: a packed
 # .zip for the Chromium family and a packed .xpi for Firefox, next to the

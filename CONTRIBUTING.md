@@ -16,7 +16,7 @@ Thanks for your interest in improving HYDRA! Contributions of all kinds are welc
 
 ## Project Layout
 
-HYDRA is a Cargo workspace with six crates:
+HYDRA is a Cargo workspace with twelve crates:
 
 | Crate directory | Published as | What it is |
 |---|---|---|
@@ -26,6 +26,12 @@ HYDRA is a Cargo workspace with six crates:
 | `crates/hydra-cli` | `hydra` binary | The CLI, `wget`/`curl` compatibility dialects, and the interactive TUI |
 | `crates/hydra-gui` | — | Cross-platform desktop download manager (iced) |
 | `crates/hydra-host` | — | Native-messaging host bridging browser extensions to the app |
+| `crates/hydra-stream` | `hya-stream` | HLS/DASH manifests and segment assembly |
+| `crates/hydra-updater` | — | Shared updater and update finisher |
+| `crates/hydra-plugin-api` | `hya-plugin-api` | Plugin manifests, plans, forms, permissions and ABI contract |
+| `crates/hydra-plugin-sdk` | `hya-plugin-sdk` | Rust guest SDK for Wasm plugin authors |
+| `crates/hydra-plugin` | `hya-plugin` | Embeddable Wasm host, package verification and plugin manager |
+| `crates/hydra-plugin-cli` | `hya-plugin-cli` | `hydra-plugin` authoring CLI: interactive init, build, validate and pack |
 
 Browser extensions live in `extensions/` (`chrome/`, `firefox/`, `safari/`), packaging and release tooling in `scripts/` and the `Makefile`, and design docs in `docs/`.
 
@@ -33,7 +39,7 @@ A good rule of thumb for where a change belongs: scheduling logic goes in `hydra
 
 ## Prerequisites
 
-- **Rust 1.80+** (the workspace pins the `stable` channel via `rust-toolchain.toml`, which also pulls in `rustfmt` and `clippy` automatically).
+- **Rust 1.86+** (the workspace pins the `stable` channel via `rust-toolchain.toml`, which also pulls in `rustfmt` and `clippy` automatically).
 - **Linux only** — GUI/system dependencies used by CI and the desktop build:
 
   ```bash
@@ -163,7 +169,7 @@ For security vulnerabilities, please **do not** open a public issue — report t
 
 HYDRA uses a split licensing model (see [LICENSING.md](LICENSING.md)):
 
-- Contributions to `crates/hydra-core`, `crates/hydra-net` and `crates/hydra-ffi` are accepted under **MIT OR Apache-2.0** (dual license). `crates/hydra-ffi` must never gain a dependency on `hydra-cli`, `hydra-gui` or `hydra-host`: those are GPL, and Rust links statically, so one such dependency would relicense the embeddable library by accident.
+- Contributions to `crates/hydra-core`, `crates/hydra-net`, `crates/hydra-ffi`, `crates/hydra-plugin-api`, `crates/hydra-plugin-sdk`, `crates/hydra-plugin` and `crates/hydra-plugin-cli` are accepted under **MIT OR Apache-2.0** (dual license). `crates/hydra-ffi` must never gain a dependency on `hydra-cli`, `hydra-gui` or `hydra-host`: those are GPL, and Rust links statically, so one such dependency would relicense the embeddable library by accident.
 - Contributions to `crates/hydra-cli` (and the rest of the workspace) are accepted under **GPL-3.0-or-later**.
 
 By submitting a pull request, you agree that your contribution is licensed under the license(s) of the crate(s) it modifies. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion shall be licensed as above, without any additional terms or conditions (per Apache-2.0 §5 for the dual-licensed crates).
