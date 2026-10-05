@@ -46,8 +46,10 @@
 # Redistributable on the machine that runs it — which a clean Windows install
 # does not have. Statically link the CRT instead so the binary is a drop-in
 # like the musl build above.
+# Clap's nested command builders exceed Windows' default 1 MiB stack in debug
+# builds; reserve the same 8 MiB available to the CLI on Linux and macOS.
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
