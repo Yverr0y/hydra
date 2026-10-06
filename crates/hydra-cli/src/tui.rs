@@ -1469,6 +1469,7 @@ mod tests {
             settings: Default::default(),
             failures: 0,
             module_sha256: String::new(),
+            native_sha256: Default::default(),
             previous: None,
         });
         assert!(

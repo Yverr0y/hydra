@@ -39,6 +39,7 @@ pub struct Ask {
     pub file_name: Option<String>,
     /// A display name and the extensions it covers, e.g. `("Audio", &["wav",
     /// "ogg"])`. Without one the panel offers every file.
+    pub owned_filter: Option<(String, Vec<String>)>,
     pub filter: Option<(&'static str, &'static [&'static str])>,
 }
 
@@ -103,6 +104,9 @@ impl Ask {
         }
         if let Some(name) = self.file_name {
             dlg = dlg.set_file_name(name);
+        }
+        if let Some((name, extensions)) = self.owned_filter {
+            dlg = dlg.add_filter(name, &extensions);
         }
         if let Some((name, extensions)) = self.filter {
             dlg = dlg.add_filter(name, extensions);

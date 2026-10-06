@@ -563,7 +563,10 @@ fn subscription(app: &App) -> Subscription<Message> {
             || app.scanning())
     {
         subs.push(
-            iced::time::every(std::time::Duration::from_millis(80)).map(|_| Message::AnimTick),
+            iced::time::every(std::time::Duration::from_millis(
+                app.animation_interval_ms(),
+            ))
+            .map(|_| Message::AnimTick),
         );
     }
     Subscription::batch(subs)

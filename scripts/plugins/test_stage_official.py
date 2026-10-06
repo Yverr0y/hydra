@@ -24,6 +24,18 @@ def bundle(entries):
 
 
 class StageOfficialTests(unittest.TestCase):
+    def test_stages_portable_and_all_native_architectures(self):
+        entries = [("youtube.hyaplugin", b"portable")]
+        entries += [(f"native/{system}-{architecture}/torrent.hyaplugin", b"native")
+                    for system in ["macos", "linux", "windows"]
+                    for architecture in ["x86_64", "aarch64"]]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with patch.object(module.urllib.request, "urlopen", return_value=io.BytesIO(bundle(entries))):
+                destination = module.stage(root, "1.0.0")
+            for name, expected in entries:
+                self.assertEqual((destination / name).read_bytes(), expected)
+
     def test_installs_release_and_refreshes_stale_bundle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -40,7 +52,12 @@ class StageOfficialTests(unittest.TestCase):
             self.assertEqual((destination / "bundle-version.txt").read_text().strip(), "1.1.0")
 
     def test_bad_bundles_leave_previous_release_intact(self):
-        for entries in [[], [("../escape.hyaplugin", b"bad")], [("key.pub", b"bad")], [("a.hyaplugin", b"first"), ("a.hyaplugin", b"duplicate")]]:
+        for entries in [[], [("../escape.hyaplugin", b"bad")], [("key.pub", b"bad")],
+                        [("a.hyaplugin", b"first"), ("a.hyaplugin", b"duplicate")],
+                        [("native/linux-x86_64/../../escape.hyaplugin", b"bad")],
+                        [("native/freebsd-x86_64/torrent.hyaplugin", b"bad")],
+                        [("native//linux-x86_64/torrent.hyaplugin", b"bad")],
+                        [("native\\linux-x86_64\\torrent.hyaplugin", b"bad")]]:
             with self.subTest(entries=entries), tempfile.TemporaryDirectory() as directory:
                 root = pathlib.Path(directory)
                 destination = root / "plugins/bundled"

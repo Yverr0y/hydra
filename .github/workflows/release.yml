@@ -1071,9 +1071,14 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  verify-official-plugins:
+    name: Verify official plugin packages
+    needs: [verify-version, verify-plugin-tools]
+    uses: ./.github/workflows/official-plugins.yml
+
   build-official-plugins:
     name: Build and sign official plugins
-    needs: [verify-version, verify-plugin-tools]
+    needs: [verify-version, verify-plugin-tools, verify-official-plugins]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1084,27 +1089,59 @@ jobs:
         with:
           python-version: '3.12'
       - uses: Swatinem/rust-cache@v2
-      - name: Build official YouTube plugin
-        run: python3 plugins/build.py hydra-youtube
-      - name: Sign and verify official package
+      - name: Download verified official plugin packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: official-plugin-build-*
+          path: unsigned-plugins
+          merge-multiple: true
+      - name: Build signing tool
+        run: cargo build --locked -p hya-plugin-cli
+      - name: Sign and verify official packages
         env:
           HYDRA_PLUGIN_SIGNING_KEY: ${{ secrets.HYDRA_PLUGIN_SIGNING_KEY }}
         run: |
-          target/debug/hydra-plugin sign plugins/hydra-youtube/youtube-download.hyaplugin \
-            --output dist/youtube-download.hyaplugin \
-            --public-key plugins/official.pub --key-env HYDRA_PLUGIN_SIGNING_KEY
+          set -euo pipefail
+          mkdir -p dist
+          test -f unsigned-plugins/unsigned-youtube-download.hyaplugin
+          test "$(find unsigned-plugins -name 'unsigned-torrent-download-*.hyaplugin' | wc -l)" -eq 6
+          for package in unsigned-plugins/unsigned-*.hyaplugin; do
+            name=$(basename "$package")
+            output="dist/${name#unsigned-}"
+            target/debug/hydra-plugin sign "$package" --output "$output" \
+              --public-key plugins/official.pub --key-env HYDRA_PLUGIN_SIGNING_KEY
+            target/debug/hydra-plugin validate "$output"
+          done
           printf '%s\n' "${{ needs.verify-version.outputs.version }}" > dist/bundle-version.txt
           cp plugins/official.pub dist/hydra-official-plugins.pub
           python3 - <<'PYZIP'
           import pathlib, zipfile
           with zipfile.ZipFile("dist/hydra-official-plugins.zip", "w", zipfile.ZIP_DEFLATED) as archive:
-              for package in sorted(pathlib.Path("dist").glob("*.hyaplugin")):
-                  archive.write(package, package.name)
+              package = pathlib.Path("dist/youtube-download.hyaplugin")
+              archive.write(package, package.name)
+              for system in ["linux", "macos", "windows"]:
+                  for architecture in ["x86_64", "aarch64"]:
+                      platform = f"{system}-{architecture}"
+                      package = pathlib.Path(f"dist/torrent-download-{platform}.hyaplugin")
+                      target = pathlib.Path("dist/native") / platform / package.name
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(package.read_bytes())
+                      archive.write(target, f"native/{platform}/{package.name}")
           PYZIP
       - uses: actions/upload-artifact@v4
         with:
           name: official-plugins
-          path: dist/*
+          path: |
+            dist/youtube-download.hyaplugin
+            dist/native/**/*.hyaplugin
+            dist/hydra-official-plugins.zip
+            dist/hydra-official-plugins.pub
+            dist/bundle-version.txt
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-native-plugins
+          path: dist/torrent-download-*.hyaplugin
           if-no-files-found: error
 
   release:
@@ -1113,6 +1150,8 @@ jobs:
     needs:
       [
         verify-version,
+        verify-plugin-tools,
+        verify-official-plugins,
         verify-packaging,
         build,
         build-appimage,
@@ -1145,6 +1184,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Exclude unsigned verification artifacts from release assets
+        run: |
+          rm -f dist/unsigned-*.hyaplugin
+          mkdir -p plugins/bundled
+          mv dist/native plugins/bundled/native
 
       - name: Generate checksums
         run: |
@@ -1285,7 +1330,7 @@ jobs:
 
             # Copy Debian packaging files to debian/ directory
             mkdir -p plugins/bundled
-            cp dist/*.hyaplugin plugins/bundled/
+            cp dist/youtube-download.hyaplugin plugins/bundled/
             cp -r packaging/debian debian
             mv cargo-vendor.toml debian/cargo-vendor.toml
 

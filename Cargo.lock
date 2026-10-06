@@ -2229,6 +2229,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "url",
  "wat",
 ]
 
@@ -2344,13 +2345,14 @@ dependencies = [
 
 [[package]]
 name = "hya-plugin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs2",
  "hya-net",
  "hya-plugin-api",
  "idna",
  "libc",
+ "libloading",
  "minisign",
  "minisign-verify",
  "semver",
@@ -2369,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "hya-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2395,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "hya-plugin-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hya-plugin-api",
  "serde",

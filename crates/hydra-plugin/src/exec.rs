@@ -19,6 +19,7 @@ use crate::runtime::CallCtl;
 pub const COOKIE_FILE: &str = "{cookie_file}";
 pub const DATA_DIR: &str = "{data}";
 const STDERR_TAIL: usize = 2048;
+const BUSY_SPAWN_RETRIES: usize = 10;
 const KEPT_ENV: &[&str] = &[
     "PATH",
     "HOME",
@@ -248,7 +249,6 @@ pub(crate) fn run_with_proxy(
     secrets: &[String],
     proxy: Option<&hya_net::Proxy>,
 ) -> Result<ExecOutput, PluginError> {
-    verify(pin)?;
     let mut cmd = Command::new(&pin.path);
     cmd.args(args)
         .current_dir(cwd)
@@ -294,12 +294,7 @@ pub(crate) fn run_with_proxy(
 
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().map_err(|e| {
-        PluginError::new(
-            ErrorCode::ToolMissing,
-            format!("{}: {e}", pin.path.display()),
-        )
-    })?;
+    let mut child = spawn_verified(pin, ctl, || cmd.spawn())?;
     let out = drain(child.stdout.take().expect("piped"));
     let err = drain(child.stderr.take().expect("piped"));
 
@@ -358,6 +353,37 @@ pub(crate) fn run_with_proxy(
         stdout_b64: hya_net::base64::encode(&redact_bytes(&stdout, secrets)),
         stderr,
     })
+}
+
+fn spawn_verified(
+    pin: &Pin,
+    ctl: &CallCtl,
+    mut spawn: impl FnMut() -> std::io::Result<std::process::Child>,
+) -> Result<std::process::Child, PluginError> {
+    verify(pin)?;
+    let mut retries = 0;
+    loop {
+        ctl.check()?;
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && retries < BUSY_SPAWN_RETRIES =>
+            {
+                // A concurrent fork can briefly retain a writer until its exec closes the descriptor.
+                retries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+                ctl.check()?;
+                verify(pin)?;
+            }
+            Err(error) => {
+                return Err(PluginError::new(
+                    ErrorCode::ToolMissing,
+                    format!("{}: {error}", pin.path.display()),
+                ));
+            }
+        }
+    }
 }
 
 /// Replaces every secret's exact value with `***`.
@@ -465,6 +491,8 @@ mod tests {
     #[cfg(unix)]
     mod unix {
         use super::*;
+        #[cfg(target_os = "linux")]
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
         fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -483,6 +511,15 @@ mod tests {
 
         fn ctl(secs: u64) -> Arc<CallCtl> {
             CallCtl::new(Duration::from_secs(secs))
+        }
+
+        #[cfg(target_os = "linux")]
+        fn busy_script(tag: &str) -> (PathBuf, Pin, std::fs::File) {
+            let directory = tmp(tag);
+            let path = script(&directory, "t", "echo approved");
+            let pinned = pin_path(path.clone()).unwrap();
+            let writer = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            (directory, pinned, writer)
         }
 
         #[test]
@@ -540,7 +577,7 @@ mod tests {
             script(&d, "t", "echo oops-sekret >&2; exit 3");
             let pinned = pin("t", std::slice::from_ref(&d)).unwrap();
             let e = run(&pinned, &[], &d, &ctl(10), &["sekret".into()]).unwrap_err();
-            assert_eq!(e.code, ErrorCode::ToolFailed);
+            assert_eq!(e.code, ErrorCode::ToolFailed, "{e:?}");
             assert!(
                 e.message.contains("exited with 3") && e.message.contains("oops-***"),
                 "{}",
@@ -614,7 +651,96 @@ mod tests {
             assert_eq!(e.code, ErrorCode::ToolMissing);
             assert!(e.message.contains("approve again"));
             let again = pin_path(p).unwrap();
-            assert!(run(&again, &[], &d, &ctl(10), &[]).is_ok());
+            let output = run(&again, &[], &d, &ctl(10), &[]).unwrap();
+            assert_eq!(
+                hya_net::base64::decode(&output.stdout_b64).unwrap(),
+                b"two-two-two\n"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_temporarily_busy_executable_runs_after_the_writer_closes() {
+            let (d, pinned, writer) = busy_script("busy-released");
+            let mut writer = Some(writer);
+            let mut command = Command::new(&pinned.path);
+            let mut child = spawn_verified(&pinned, &ctl(10), || {
+                let result = command.spawn();
+                if writer.is_some() {
+                    assert_eq!(
+                        result.as_ref().unwrap_err().kind(),
+                        std::io::ErrorKind::ExecutableFileBusy
+                    );
+                    drop(writer.take());
+                }
+                result
+            })
+            .unwrap();
+            assert!(child.wait().unwrap().success());
+            let output = run(&pinned, &[], &d, &ctl(10), &[]).unwrap();
+            assert_eq!(
+                hya_net::base64::decode(&output.stdout_b64).unwrap(),
+                b"approved\n"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn an_executable_that_stays_busy_has_bounded_retries() {
+            let (d, pinned, _writer) = busy_script("busy-persistent");
+            assert_eq!(
+                Command::new(&pinned.path).spawn().unwrap_err().kind(),
+                std::io::ErrorKind::ExecutableFileBusy
+            );
+            let started = std::time::Instant::now();
+            let error = run(&pinned, &[], &d, &ctl(10), &[]).unwrap_err();
+            assert_eq!(error.code, ErrorCode::ToolMissing);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn busy_retry_refuses_a_changed_executable_before_it_can_run() {
+            let (_, pinned, mut writer) = busy_script("busy-changed");
+            let mut command = Command::new(&pinned.path);
+            let mut attempts = 0;
+            let error = spawn_verified(&pinned, &ctl(10), || {
+                attempts += 1;
+                let result = command.spawn();
+                assert_eq!(
+                    result.as_ref().unwrap_err().kind(),
+                    std::io::ErrorKind::ExecutableFileBusy
+                );
+                writer.write_all(b"#!/bin/sh\necho changed!\n").unwrap();
+                result
+            })
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(error.code, ErrorCode::ToolMissing);
+            assert!(error.message.contains("approve again"), "{error:?}");
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn busy_retry_obeys_deadline_and_cancellation() {
+            let (d, pinned, _writer) = busy_script("busy-controls");
+            let control = CallCtl::new(Duration::from_millis(20));
+            assert_eq!(
+                run(&pinned, &[], &d, &control, &[]).unwrap_err().code,
+                ErrorCode::Deadline
+            );
+            let control = ctl(10);
+            let mut command = Command::new(&pinned.path);
+            assert_eq!(
+                spawn_verified(&pinned, &control, || {
+                    let result = command.spawn();
+                    control.cancel();
+                    result
+                })
+                .unwrap_err()
+                .code,
+                ErrorCode::Cancelled
+            );
         }
 
         #[test]

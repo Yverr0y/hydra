@@ -1,0 +1,69 @@
+id = "hydra.torrent"
+name = "Torrent Downloader"
+author = "Hydra Team"
+version = "0.1.0"
+api = 1
+min_hydra = "1.0.7"
+module = "plugin.wasm"
+memory_mb = 128
+license = "MIT OR Apache-2.0"
+welcome = "Add a magnet link or browse for a torrent file. This plugin imports libtorrent through its packaged native library. Native code runs with Hydra's operating-system permissions. Transfers upload pieces to peers while downloading. Seeding after download stops immediately by default; change Seeding time to keep sharing. Single-file torrents save as a file; multi-file torrents save the selected files in a folder."
+hooks = ["resolve", "check"]
+claims = ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*"]
+
+[[input_actions]]
+label = "Browse Torrent File"
+extensions = ["torrent"]
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "macos-aarch64"
+module = "torrent-macos-aarch64.dylib"
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "macos-x86_64"
+module = "torrent-macos-x86_64.dylib"
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "linux-x86_64"
+module = "torrent-linux-x86_64.so"
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "linux-aarch64"
+module = "torrent-linux-aarch64.so"
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "windows-x86_64"
+module = "torrent-windows-x86_64.dll"
+
+[[native_modules]]
+id = "torrent-engine"
+platform = "windows-aarch64"
+module = "torrent-windows-aarch64.dll"
+
+[permissions]
+http = ["*"]
+native = ["torrent-engine"]
+
+[[settings]]
+key = "seed_seconds"
+label = "Seeding time after download (seconds)"
+type = "number"
+default = 0
+min = 0
+max = 86400
+help = "Uploads also happen during download. Zero stops sharing once the selected files are complete."
+
+[[settings]]
+key = "upload_limit"
+label = "Upload limit (bytes per second)"
+type = "number"
+default = 0
+min = 0
+max = 2147483647
+help = "Zero means unlimited."
+

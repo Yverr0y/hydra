@@ -1,3 +1,6 @@
+#[path = "src/bundle.rs"]
+mod bundle;
+
 fn main() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = root.join("../../Cargo.toml");
@@ -25,8 +28,18 @@ fn main() {
         .unwrap_or_else(|| root.join("../../plugins/bundled"));
     println!("cargo:rerun-if-changed={}", bundle.display());
     let mut packages = Vec::new();
-    if bundle.exists() {
-        for entry in std::fs::read_dir(&bundle).expect("read official plugin bundle") {
+    let platform = format!(
+        "{}-{}",
+        std::env::var("CARGO_CFG_TARGET_OS").expect("target OS"),
+        std::env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture")
+    );
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    for directory in bundle::directories(&bundle, &platform, &target_env) {
+        println!("cargo:rerun-if-changed={}", directory.display());
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(directory).expect("read official plugin bundle") {
             let path = entry.expect("official plugin entry").path();
             if path.extension().is_some_and(|ext| ext == "hyaplugin") {
                 packages.push(std::fs::canonicalize(path).expect("official plugin path"));

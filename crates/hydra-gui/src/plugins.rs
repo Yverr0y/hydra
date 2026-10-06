@@ -19,6 +19,10 @@ pub struct PlanInfo {
 
 pub fn file_name(info: &PlanInfo) -> String {
     let plan = &info.plan;
+    if plan.transfer.is_some() {
+        return hya_net::filename::portable(plan.title.as_deref().unwrap_or(&plan.id))
+            .unwrap_or_else(|| "transfer-download".into());
+    }
     let selected = hya_plugin_api::select(plan, &info.preferences);
     let mux = plan.assemble == hya_plugin_api::Assemble::Mux
         && [
@@ -54,12 +58,20 @@ pub async fn resolve(
     referer: Option<String>,
     cookies: Option<String>,
     browser_cookies: Option<hya_net::CookieJar>,
+    only: Option<String>,
+    ctl: std::sync::Arc<hya_plugin::runtime::CallCtl>,
 ) -> Result<Option<PlanInfo>, String> {
     let root = crate::model::app_dir().join("plugins");
     tokio::task::spawn_blocking(move || {
         let mut manager = Manager::open_with_official(root).map_err(|e| e.to_string())?;
         let mut context = hya_plugin::manager::ResolveContext {
             proxy: crate::proxy::active().plugin_proxy(),
+            only,
+            ctl,
+            input_file: url::Url::parse(&url)
+                .ok()
+                .filter(|url| url.scheme() == "file")
+                .and_then(|url| url.to_file_path().ok()),
             ..Default::default()
         };
         let connector =
@@ -1090,6 +1102,11 @@ fn permission_summary(permissions: &hya_plugin_api::Permissions) -> Vec<String> 
             "Runs {program} using {count} permitted argument patterns."
         ));
     }
+    for id in &permissions.native {
+        lines.push(format!(
+            "Loads native module {id} with full operating-system access."
+        ));
+    }
     if permissions.data {
         lines.push("Keeps files in its own folder.".into());
     }
@@ -1314,6 +1331,9 @@ fn capabilities(installed: &Installed) -> Vec<(String, bool)> {
             result.push((format!("{kind}:{host}"), granted.contains(host)));
         }
     }
+    for id in &installed.manifest.permissions.native {
+        result.push((format!("native:{id}"), installed.grants.native.contains(id)));
+    }
     for entry in &installed.manifest.permissions.exec {
         let capability = format!("exec:{}", entry.program);
         if !result.iter().any(|(c, _)| c == &capability) {
@@ -1370,7 +1390,13 @@ impl hya_plugin::host::Frontend for Frontend {
         }
     }
     fn log(&mut self, level: &str, message: &str) {
-        crate::log::info(&format!("plugin {} [{level}]: {message}", self.plugin));
+        let line = format!("plugin {}: {message}", self.plugin);
+        match level {
+            "debug" | "trace" => crate::log::debug(&line),
+            "warn" | "warning" => crate::log::warn(&line),
+            "error" => crate::log::error(&line),
+            _ => crate::log::info(&line),
+        }
     }
     fn progress(&mut self, _: u64, _: Option<u64>, _: Option<&str>) {}
 }
@@ -1398,6 +1424,24 @@ fn form_answers(
         answers.insert(field.key.clone(), value);
     }
     Ok(answers)
+}
+
+/// File actions declared by enabled plugins in resolver precedence order.
+pub fn input_actions(app: &App) -> Vec<(String, usize, hya_plugin_api::InputAction)> {
+    app.options
+        .plugins
+        .installed
+        .iter()
+        .filter(|plugin| plugin.enabled)
+        .flat_map(|plugin| {
+            plugin
+                .manifest
+                .input_actions
+                .iter()
+                .enumerate()
+                .map(|(index, action)| (plugin.manifest.id.clone(), index, action.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1454,6 +1498,76 @@ pub(crate) mod tests {
             {"id":"s","kind":"subtitle","language":"en","container":"vtt","sources":[{"url":"https://example.com/subtitle"}]}
         ]})).unwrap(), preferences:hya_plugin_api::Preferences {include_files:true,container:Some("mp4".into()),..Default::default()} }
     }
+
+    pub(crate) fn file_plugin(id: &str, label: &str, extension: &str) -> Installed {
+        serde_json::from_value(serde_json::json!({"manifest": {"id":id,"name":label,"version":"1.0.0","api":1,"module":"plugin.wasm",
+            "input_actions":[{"label":label,"extensions":[extension]}]}, "directory":"/plugins/test", "dev":false,"enabled":true,"grants":{},"pins":{}})).unwrap()
+    }
+
+    pub(crate) fn transfer_plan() -> PlanInfo {
+        PlanInfo {plugin:"example.x".into(), plan:serde_json::from_value(serde_json::json!({"id":"transfer", "title":"Native download", "tracks":[],
+            "transfer":{"engine":"x-engine","metadata":{},"files":[{"index":0,"path":"one.x","size":10},{"index":1,"path":"two.x","size":20}],"notice":"Select the files to download."}})).unwrap(), preferences:Default::default()}
+    }
+
+    #[test]
+    fn file_buttons_follow_enabled_plugins_and_keep_each_plugins_label() {
+        let mut app = App::default();
+        app.options.plugins.installed = vec![
+            file_plugin("example.x", "Browse X File", "x"),
+            file_plugin("example.torrent", "Browse Torrent File", "torrent"),
+        ];
+        let actions = input_actions(&app);
+        assert_eq!(
+            actions
+                .iter()
+                .map(|(_, _, action)| action.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Browse X File", "Browse Torrent File"]
+        );
+        app.options.plugins.installed[0].enabled = false;
+        assert_eq!(input_actions(&app).len(), 1);
+        app.options.plugins.installed.clear();
+        assert!(input_actions(&app).is_empty());
+    }
+
+    #[test]
+    fn native_file_selection_is_preserved_and_stale_probe_replies_are_ignored() {
+        let mut app = App::default();
+        app.add_url.plugin_plan = Some(transfer_plan());
+        let _ = app.update(crate::app::Message::TransferFileSelected(0, false));
+        let _ = app.update(crate::app::Message::TransferFileSelected(99, true));
+        assert_eq!(
+            app.add_url
+                .plugin_plan
+                .as_ref()
+                .unwrap()
+                .preferences
+                .transfer_files
+                .as_deref(),
+            Some([1].as_slice())
+        );
+        let _ = app.update(crate::app::Message::TransferFileSelected(0, true));
+        assert_eq!(
+            app.add_url
+                .plugin_plan
+                .as_ref()
+                .unwrap()
+                .preferences
+                .transfer_files
+                .as_deref(),
+            Some([1, 0].as_slice())
+        );
+        let current = hya_plugin::runtime::CallCtl::new(std::time::Duration::from_secs(10));
+        app.add_url.plugin_ctl = Some(current);
+        let stale = hya_plugin::runtime::CallCtl::new(std::time::Duration::from_secs(10));
+        let _ = app.update(crate::app::Message::PluginProbeFinished(
+            "file:///tmp/input.x".into(),
+            stale,
+            Box::new(Err("stale failure".into())),
+        ));
+        assert!(app.add_url.error.is_none());
+    }
+
     #[test]
     fn permission_summary_retains_hosts_programs_cookies_and_downloaded_execution() {
         let manifest: Manifest = toml::from_str(include_str!(

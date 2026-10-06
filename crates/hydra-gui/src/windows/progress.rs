@@ -469,6 +469,48 @@ fn chunk_strip<'a>(d: &DownloadItem) -> El<'a> {
 const CONN_N_W: f32 = 50.0;
 const CONN_SIZE_W: f32 = 150.0;
 
+fn plugin_table<'a>(d: &'a DownloadItem, details: &'a hya_plugin_api::TransferDetails) -> El<'a> {
+    let table_width = (details.columns.len() as f32 * 160.0).max(640.0);
+    let cells = |values: &[String]| {
+        let mut cells = row![].spacing(0).width(table_width);
+        for value in values {
+            cells = cells.push(cell(value.clone(), 160.0).padding([1, 6]));
+        }
+        cells
+    };
+    let header = cells(&details.columns).height(22.0);
+    let mut rows = column![].width(table_width);
+    let blank = vec![String::new(); details.columns.len()];
+    for index in 0..d.plugin_details.len().max(8) {
+        rows = rows.push(cells(d.plugin_details.get(index).unwrap_or(&blank)).height(20.0));
+    }
+    let table = column![
+        header,
+        container(
+            crate::ui::scroll(rows)
+                .width(Length::Fill)
+                .height(Length::Fill)
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(row_band)
+    ]
+    .width(table_width)
+    .height(Length::Fill);
+    container(
+        crate::ui::scroll(table)
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::default(),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::panel)
+    .into()
+}
+
 fn conn_table<'a>(d: &'a DownloadItem) -> El<'a> {
     // Header stays put; only the rows scroll.
     let header = row![
@@ -651,6 +693,17 @@ pub fn view(app: &App, id: crate::model::DlId) -> El<'_> {
                 theme::FONT_SIZE,
             ));
             col = col.push(scan_log(st));
+        } else if let Some(details) = d
+            .plugin_plan
+            .as_ref()
+            .and_then(|info| info.plan.transfer.as_ref())
+            .and_then(|transfer| transfer.details.as_ref())
+        {
+            col = col.push(crate::windows::centered(
+                details.title.clone(),
+                theme::FONT_SIZE,
+            ));
+            col = col.push(plugin_table(d, details));
         } else {
             col = col.push(crate::windows::centered(
                 tr("Start positions and download progress by connections"),

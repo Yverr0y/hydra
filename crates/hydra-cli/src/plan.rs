@@ -11,6 +11,16 @@ pub async fn run(
     if template.to_stdout {
         return Err("plugin plans require an output file; --stdout is unsupported".into());
     }
+    if let Some(transfer) = plan.transfer.take() {
+        return run_transfer(
+            *transfer,
+            template,
+            prefs,
+            plugin,
+            plan.title.as_deref().unwrap_or(&plan.id),
+        )
+        .await;
+    }
     let selected = hya_plugin_api::select(&plan, &prefs);
     if selected.tracks.is_empty() {
         return Err("no tracks match the selection".into());
@@ -335,4 +345,136 @@ fn publish(
     }
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+async fn run_transfer(
+    transfer: hya_plugin_api::Transfer,
+    template: crate::download::Job,
+    prefs: Preferences,
+    plugin: &str,
+    title: &str,
+) -> Result<crate::download::Outcome, String> {
+    hya_plugin::transfer::validate(&transfer).map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    let authorization_plugin = plugin.to_owned();
+    let program = transfer.engine.clone();
+    let executable = tokio::task::spawn_blocking(move || {
+        hya_plugin::transfer::authorize(
+            hya_plugin::hydra_dir().join("plugins"),
+            &authorization_plugin,
+            &program,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let destination = template.output.clone().unwrap_or_else(|| {
+        template
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(hya_net::filename::portable(title).unwrap_or_else(|| "download".into()))
+    });
+    let selected_size: u64 = transfer
+        .files
+        .iter()
+        .filter(|file| {
+            prefs
+                .transfer_files
+                .as_ref()
+                .is_none_or(|indices| indices.contains(&file.index))
+        })
+        .map(|file| file.size)
+        .sum();
+    if template
+        .max_filesize
+        .is_some_and(|maximum| selected_size > maximum)
+    {
+        return Err("selected torrent files exceed --max-filesize".into());
+    }
+    if template.no_clobber && destination.exists() {
+        return Err(format!(
+            "{} already exists; --no-clobber prevents resuming it",
+            destination.display()
+        ));
+    }
+    let mut resume_name = destination.as_os_str().to_owned();
+    resume_name.push(".hydra-transfer-resume");
+    let schema = transfer.details.clone();
+    let mut display = crate::download::progress_for(&template, title, Some(selected_size))?;
+    let resuming = destination.exists();
+    let mut baseline_set = !resuming;
+    let request = hya_plugin::transfer::Request {
+        transfer,
+        destination: destination.clone(),
+        files: prefs.transfer_files,
+        download_limit: template.limit_rate,
+        control: None,
+        resume_path: resume_name.into(),
+        proxy: (!template.no_proxy)
+            .then_some(template.proxy.as_deref())
+            .flatten()
+            .map(hya_net::Proxy::parse)
+            .transpose()?
+            .as_ref()
+            .map(hya_plugin::transfer::proxy_config),
+    };
+    let cancel = template
+        .cancel
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let filter = std::env::var("HYDRA_LOG").unwrap_or_else(|_| "info".into());
+    let mut last_done = 0;
+    let result = hya_plugin::transfer::download(&executable, request, cancel, |progress| {
+        for record in &progress.logs {
+            if crate::plugins::log_enabled(&record.level, &filter) {
+                display.event(
+                    0,
+                    &format!("[{plugin}] {}: {}", record.level, record.message),
+                );
+            }
+        }
+        if !baseline_set && progress.state != "checking" {
+            display.set_baseline(progress.done);
+            baseline_set = true;
+        }
+        last_done = progress.done;
+        display.set_reported_rate(progress.download_rate);
+        display.set_plugin_details(
+            format!(
+                "{} · {} peers · upload {}/s",
+                progress.state,
+                progress.peers,
+                hya_core::fmt::bytes(progress.upload_rate)
+            ),
+            schema.as_ref(),
+            &progress.details,
+        );
+        display.draw(progress.done, &[], Default::default());
+    })
+    .await;
+    match &result {
+        Ok(progress) => display.finish(
+            progress.done,
+            progress.state == "complete",
+            Default::default(),
+            None,
+        ),
+        Err(error) => {
+            display.event(0, &format!("[{plugin}] error: {error}"));
+            display.finish(last_done, false, Default::default(), None);
+        }
+    }
+    let progress = result?;
+    Ok(crate::download::Outcome {
+        url: template.urls.first().cloned().unwrap_or_default(),
+        output: destination.to_string_lossy().into_owned(),
+        size: progress.done,
+        elapsed_s: started.elapsed().as_secs_f64(),
+        transfer_s: started.elapsed().as_secs_f64(),
+        throughput_bps: progress.done as f64 / started.elapsed().as_secs_f64().max(0.001),
+        ok: progress.state == "complete",
+        note: (progress.state != "complete").then(|| "transfer stopped; resume state saved".into()),
+        ..Default::default()
+    })
 }

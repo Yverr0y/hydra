@@ -32,6 +32,8 @@ pub struct Preferences {
     /// Explicit track ids override every other rule for their kind.
     pub track_ids: Vec<String>,
     pub include_files: bool,
+    /// Transfer file indices; None selects every non-padding file.
+    pub transfer_files: Option<Vec<u32>>,
 }
 
 /// Indices into `Plan::tracks`, in plan order.
@@ -200,6 +202,7 @@ mod tests {
 
     fn plan(tracks: Vec<Track>) -> Plan {
         Plan {
+            transfer: None,
             id: "p".into(),
             title: None,
             expires_at: None,

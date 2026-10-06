@@ -266,6 +266,7 @@ pub fn plan(info: &Value) -> hya_plugin_sdk::Result<Plan> {
             expires_at: None,
             assemble: Assemble::None,
             tracks: Vec::new(),
+            transfer: None,
             entries,
         });
     }
@@ -371,6 +372,7 @@ pub fn plan(info: &Value) -> hya_plugin_sdk::Result<Plan> {
         title: text(info, "title").map(str::to_owned),
         expires_at,
         assemble: Assemble::Mux,
+        transfer: None,
         entries: Vec::new(),
         tracks,
     })

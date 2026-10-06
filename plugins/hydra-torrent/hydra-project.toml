@@ -1,0 +1,6 @@
+name = "hydra-torrent"
+display_name = "Torrent Downloader"
+language = "rust"
+id = "hydra.torrent"
+version = "0.1.0"
+author = "Hydra Team"

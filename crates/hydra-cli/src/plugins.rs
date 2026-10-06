@@ -29,6 +29,7 @@ impl Options {
                 },
                 subtitle_languages: args.subs.clone(),
                 track_ids: args.tracks.clone(),
+                transfer_files: None,
             },
         }
     }
@@ -36,10 +37,24 @@ impl Options {
 pub async fn resolve_job(
     job: &crate::download::Job,
 ) -> Result<Option<(String, hya_plugin_api::Plan)>, String> {
+    let request_url = input_url(&job.urls[0])?;
     let mut context = hya_plugin::manager::ResolveContext {
+        input_file: ::url::Url::parse(&request_url)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok()),
         only: job.plugin_options.as_ref().and_then(|o| o.only.clone()),
-        proxy: crate::url::ProxyPolicy::new(job.proxy.as_deref(), job.no_proxy)
-            .for_url(&crate::url::Url::parse(&job.urls[0]).ok_or("invalid address")?)?,
+        proxy: match crate::url::Url::parse(&job.urls[0]) {
+            Some(url) => {
+                crate::url::ProxyPolicy::new(job.proxy.as_deref(), job.no_proxy).for_url(&url)?
+            }
+            None if !job.no_proxy => job
+                .proxy
+                .as_deref()
+                .map(hya_net::Proxy::parse)
+                .transpose()?,
+            None => None,
+        },
         ..Default::default()
     };
     let cookies = job.cookies.clone();
@@ -48,7 +63,7 @@ pub async fn resolve_job(
         .unwrap_or_default();
     let ctl = context.ctl.clone();
     let request = hya_plugin_api::ResolveRequest {
-        url: job.urls[0].clone(),
+        url: request_url,
         headers: job
             .headers
             .iter()
@@ -76,6 +91,20 @@ pub async fn resolve_job(
             result = &mut worker => return result.map_err(|e|e.to_string())?,
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => if job.cancel.as_ref().is_some_and(|c|c.load(std::sync::atomic::Ordering::Relaxed)) { ctl.cancel(); }
         }
+    }
+}
+
+fn input_url(address: &str) -> Result<String, String> {
+    if !address.contains("://")
+        && !address.starts_with("magnet:")
+        && std::path::Path::new(address).extension().is_some()
+    {
+        let path = std::path::absolute(address).map_err(|e| e.to_string())?;
+        ::url::Url::from_file_path(path)
+            .map_err(|_| "invalid local file path".to_owned())
+            .map(String::from)
+    } else {
+        Ok(address.to_owned())
     }
 }
 
@@ -117,8 +146,12 @@ pub async fn refresh_plan(
     let url = job.urls[0].clone();
     let cookies = job.cookies.clone();
     let context = hya_plugin::manager::ResolveContext {
-        proxy: crate::url::ProxyPolicy::new(job.proxy.as_deref(), job.no_proxy)
-            .for_url(&crate::url::Url::parse(&job.urls[0]).ok_or("invalid address")?)?,
+        proxy: match crate::url::Url::parse(&job.urls[0]) {
+            Some(url) => {
+                crate::url::ProxyPolicy::new(job.proxy.as_deref(), job.no_proxy).for_url(&url)?
+            }
+            None => None,
+        },
         ..Default::default()
     };
     let ctl = context.ctl.clone();
@@ -437,6 +470,16 @@ pub enum IndexCommand {
     },
 }
 
+pub(crate) fn log_enabled(level: &str, filter: &str) -> bool {
+    let rank = |value: &str| match value.to_ascii_lowercase().as_str() {
+        "trace" | "debug" | "verbose" => 0,
+        "warn" | "warning" => 2,
+        "error" => 3,
+        _ => 1,
+    };
+    rank(level) >= rank(filter)
+}
+
 pub struct Terminal {
     id: String,
 }
@@ -523,6 +566,10 @@ impl Frontend for Terminal {
         Ok(answers)
     }
     fn log(&mut self, level: &str, message: &str) {
+        let filter = std::env::var("HYDRA_LOG").unwrap_or_else(|_| "info".into());
+        if !log_enabled(level, &filter) {
+            return;
+        }
         if crate::plugin_ui::active() {
             crate::plugin_ui::send(crate::plugin_ui::Event::Log(format!(
                 "[{}] {level}: {message}",
@@ -860,7 +907,31 @@ pub async fn run(command: &Command) -> std::process::ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_diagnostics_respect_the_selected_log_level() {
+        assert!(!super::log_enabled("debug", "info"));
+        assert!(super::log_enabled("debug", "DEBUG"));
+        assert!(!super::log_enabled("info", "warn"));
+        assert!(super::log_enabled("error", "warn"));
+    }
+
     use super::*;
+
+    #[test]
+    fn positional_file_inputs_preserve_spaces_and_leave_urls_and_magnets_unchanged() {
+        let path = std::path::absolute("input directory/test.X").unwrap();
+        let address = input_url(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            ::url::Url::parse(&address).unwrap().to_file_path().unwrap(),
+            path
+        );
+        for address in [
+            "https://example.com/file.x",
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789",
+        ] {
+            assert_eq!(input_url(address).unwrap(), address);
+        }
+    }
 
     #[test]
     fn catalog_update_arguments_require_explicit_permission_consent() {

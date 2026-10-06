@@ -38,6 +38,9 @@ pub struct Counters {
 
 pub struct Progress {
     total: Option<u64>,
+    plugin_summary: Option<String>,
+    reported_rate: Option<f64>,
+    plugin_details: Option<(hya_plugin_api::TransferDetails, Vec<Vec<String>>)>,
     started: Instant,
     last_draw: Instant,
     last_bytes: u64,
@@ -91,6 +94,9 @@ impl Progress {
     pub fn new(name: &str, total: Option<u64>, verbose: u8, no_frame: bool, silent: bool) -> Self {
         Self {
             total,
+            plugin_summary: None,
+            reported_rate: None,
+            plugin_details: None,
             started: Instant::now(),
             last_draw: Instant::now() - Duration::from_secs(1),
             last_bytes: 0,
@@ -236,6 +242,80 @@ impl Progress {
         self.rate = SeededRate::primed(bytes);
     }
 
+    pub fn set_reported_rate(&mut self, bytes_per_second: u64) {
+        self.reported_rate = Some(bytes_per_second as f64);
+    }
+
+    pub fn set_plugin_details(
+        &mut self,
+        summary: String,
+        schema: Option<&hya_plugin_api::TransferDetails>,
+        rows: &[Vec<String>],
+    ) {
+        self.plugin_summary = Some(summary);
+        self.plugin_details = schema.map(|schema| (schema.clone(), rows.to_vec()));
+    }
+
+    fn plugin_table(&self, width: usize, height: usize) -> Vec<String> {
+        let Some((schema, rows)) = &self.plugin_details else {
+            return Vec::new();
+        };
+        let count = schema.columns.len();
+        if count == 0 {
+            return Vec::new();
+        }
+        let available = width.saturating_sub(2 + count.saturating_sub(1) * 2);
+        if available < count {
+            return vec![trunc(
+                "Terminal too narrow for plugin details",
+                width.saturating_sub(2),
+            )];
+        }
+        let mut widths: Vec<usize> = schema
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                rows.iter()
+                    .filter_map(|row| row.get(index))
+                    .map(|value| value.chars().count())
+                    .chain([label.chars().count()])
+                    .max()
+                    .unwrap_or(4)
+                    .clamp(4, 24)
+            })
+            .collect();
+        while widths.iter().sum::<usize>() > available {
+            let Some((index, _)) = widths
+                .iter()
+                .enumerate()
+                .filter(|(_, width)| **width > 1)
+                .max_by_key(|(_, width)| **width)
+            else {
+                break;
+            };
+            widths[index] -= 1;
+        }
+        let format_row = |values: &[String]| {
+            values
+                .iter()
+                .zip(&widths)
+                .map(|(value, width)| format!("{:<width$}", trunc(value, *width), width = *width))
+                .collect::<Vec<_>>()
+                .join("  ")
+        };
+        let visible = height.saturating_sub(7).max(1);
+        let mut lines = vec![
+            trunc(&schema.title, width.saturating_sub(2)),
+            format_row(&schema.columns),
+        ];
+        lines.extend(rows.iter().take(visible).map(|values| format_row(values)));
+        if rows.len() > visible {
+            lines.push(format!("Showing {visible} of {} rows", rows.len()));
+        }
+        lines
+    }
+
     /// Redraw. Rate-limited to ~12 fps: redrawing per arrival makes the terminal
     /// the bottleneck on a fast transfer.
     pub fn draw(&mut self, done: u64, conns: &[ConnView], c: Counters) {
@@ -256,9 +336,11 @@ impl Progress {
         };
         self.last_draw = Instant::now();
         self.last_bytes = done;
-        self.history.push(inst);
+        self.history.push(self.reported_rate.unwrap_or(inst));
         self.clock += dt.as_secs_f64();
-        let inst = self.rate.sample(self.clock, done, inst);
+        let inst = self
+            .reported_rate
+            .unwrap_or_else(|| self.rate.sample(self.clock, done, inst));
         if self.history.len() > 48 {
             self.history.remove(0);
         }
@@ -270,6 +352,22 @@ impl Progress {
                     .total
                     .map(|t| format!("{:.1}%", 100.0 * done as f64 / t as f64))
                     .unwrap_or_else(|| "?".into());
+                if let Some(summary) = &self.plugin_summary {
+                    self.emit(&format!(
+                        "{} {} {} {}/s — {}",
+                        self.name,
+                        pct,
+                        fmt::bytes(done),
+                        fmt::bytes(inst as u64),
+                        summary
+                    ));
+                    if self.verbose > 0 {
+                        for line in self.plugin_table(120, 24) {
+                            self.emit(&line);
+                        }
+                    }
+                    return;
+                }
                 self.emit(&format!(
                     "{} {} {} {}/s reqs={} repairs={}",
                     self.name,
@@ -323,8 +421,9 @@ impl Progress {
                     "─".repeat(BAR_W - filled)
                 );
                 let remain = t.saturating_sub(done) as f64;
-                let eta = if avg > RateMeter::ETA_FLOOR {
-                    remain / avg
+                let eta_rate = self.reported_rate.unwrap_or(avg);
+                let eta = if eta_rate > RateMeter::ETA_FLOOR {
+                    remain / eta_rate
                 } else {
                     f64::NAN
                 };
@@ -351,6 +450,16 @@ impl Progress {
             fmt::duration(elapsed)
         );
         lines += 1;
+
+        if let Some(summary) = &self.plugin_summary {
+            let _ = writeln!(out, "  {}\x1b[K", summary);
+            lines += 1;
+            let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+            for line in self.plugin_table(usize::from(width), usize::from(height)) {
+                let _ = writeln!(out, "  {line}\x1b[K");
+                lines += 1;
+            }
+        }
 
         // Per-connection detail: the reason this renderer is hand-rolled.
         for cv in conns {
@@ -386,7 +495,7 @@ impl Progress {
             lines += 1;
         }
 
-        if self.verbose > 0 {
+        if self.verbose > 0 && self.plugin_summary.is_none() {
             let _ = writeln!(
                 out,
                 "   \x1b[90mrequests {}  repairs {}  reclaims {}  retries {}  wasted {}\x1b[0m\x1b[K",
@@ -458,13 +567,18 @@ impl Progress {
         } else {
             fmt::bytes(done)
         };
+        let requests = if self.plugin_summary.is_some() {
+            String::new()
+        } else {
+            format!(", {} requests", c.requests)
+        };
         line!(
-            "{mark} {} — {} in {} ({}/s), {} requests{}",
+            "{mark} {} — {} in {} ({}/s){}{}",
             self.name,
             moved_str,
             fmt::duration(el),
             fmt::bytes(rate as u64),
-            c.requests,
+            requests,
             digest
                 .map(|d| format!(", sha256 {}", &d[..d.len().min(16)]))
                 .unwrap_or_default()
@@ -1035,6 +1149,58 @@ pub fn demo_multi() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_frame_uses_declared_columns_instead_of_http_connection_fields() {
+        let mut progress = Progress::new("native.bin", Some(100), 1, false, false);
+        let schema = hya_plugin_api::TransferDetails {
+            title: "Worker connections".into(),
+            columns: vec!["Endpoint".into(), "Bytes".into(), "State".into()],
+        };
+        progress.set_plugin_details(
+            "downloading · 2 workers".into(),
+            Some(&schema),
+            &[vec!["peer-one".into(), "50".into(), "receiving".into()]],
+        );
+        let (frame, lines) = progress.frame(50, 10.0, &[], Default::default());
+        for text in [
+            "Worker connections",
+            "Endpoint",
+            "Bytes",
+            "State",
+            "peer-one",
+            "receiving",
+            "50.0%",
+        ] {
+            assert!(frame.contains(text), "{text}");
+        }
+        assert!(!frame.contains("requests 0"));
+        assert!(!frame.contains("idle"));
+        assert_eq!(frame.lines().count(), lines);
+    }
+
+    #[test]
+    fn plugin_table_fits_terminal_width_and_bounds_visible_rows() {
+        let mut progress = Progress::new("native", None, 0, false, false);
+        let schema = hya_plugin_api::TransferDetails {
+            title: "Peers".into(),
+            columns: vec!["Peer".into(), "Transferred".into(), "Client".into()],
+        };
+        let rows = vec![
+            vec![
+                "2001:db8::1:6881".into(),
+                "1000000".into(),
+                "Long client name".into()
+            ];
+            64
+        ];
+        progress.set_plugin_details("downloading".into(), Some(&schema), &rows);
+        let lines = progress.plugin_table(40, 24);
+        assert!(lines.iter().all(|line| line.chars().count() <= 38));
+        assert!(lines.len() <= 21);
+        assert!(lines.last().unwrap().contains("of 64 rows"));
+        assert_eq!(progress.plugin_table(3, 24).len(), 1);
+    }
 
     #[test]
     fn sparkline_is_empty_until_there_is_something_to_show() {

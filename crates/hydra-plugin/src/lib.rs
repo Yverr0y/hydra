@@ -5,8 +5,10 @@ pub mod exec;
 pub mod host;
 pub mod http;
 pub mod matcher;
+pub mod native;
 pub mod package;
 pub mod runtime;
+pub mod transfer;
 
 pub mod dirs;
 pub mod distribution;
@@ -32,6 +34,11 @@ pub fn consent(p: &hya_plugin_api::Permissions) -> Vec<String> {
             "Runs {} with arguments: {}",
             exec.program,
             exec.args.join(" ")
+        ));
+    }
+    for id in &p.native {
+        lines.push(format!(
+            "Loads native module {id} into Hydra with full operating-system access."
         ));
     }
     if p.data {

@@ -214,13 +214,24 @@ pub fn open(bytes: &[u8], expected_sha256: Option<&str>) -> Result<Package, Pack
         if i == manifest_idx {
             continue;
         }
-        let Some(cap) = allowed_cap(name, Some(&manifest.module)) else {
+        let Some(cap) = allowed_cap(name, Some(&manifest.module)).or_else(|| {
+            manifest
+                .native_modules
+                .iter()
+                .any(|m| m.module == *name)
+                .then_some(MAX_MODULE)
+        }) else {
             return refuse(format!("entry `{name}` is not allowed in a package"));
         };
         let mut f = zip.by_index(i).map_err(|e| PackageError(e.to_string()))?;
         entries.insert(name.clone(), read_bounded(&mut f, cap, &mut total, name)?);
     }
 
+    for native in &manifest.native_modules {
+        if !entries.contains_key(&native.module) {
+            return refuse(format!("native module `{}` is missing", native.module));
+        }
+    }
     let module = entries
         .get(&manifest.module)
         .cloned()
@@ -340,6 +351,18 @@ pub fn load_dir(dir: &Path) -> Result<Package, PackageError> {
     let mut entries = BTreeMap::new();
     entries.insert(MANIFEST_NAME.to_string(), manifest_bytes);
     entries.insert(manifest.module.clone(), module.clone());
+    let mut total = entries
+        .values()
+        .map(|bytes| bytes.len() as u64)
+        .sum::<u64>();
+    for native in &manifest.native_modules {
+        let bytes = read(&native.module, MAX_MODULE)?;
+        total += bytes.len() as u64;
+        if total > MAX_PACKAGE_UNPACKED {
+            return refuse("native package exceeds extraction limit");
+        }
+        entries.insert(native.module.clone(), bytes);
+    }
     Ok(Package {
         archive_sha256: sha256_hex(&module),
         manifest,
@@ -583,6 +606,39 @@ mod tests {
         std::fs::remove_file(dir.join("plugin.wasm")).unwrap();
         assert!(load_dir(&dir).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn native_libraries_are_declared_present_and_covered_by_package_checksums() {
+        let manifest = manifest_toml(
+            "[[native_modules]]\nid='test-engine'\nplatform='linux-x86_64'\nmodule='test.so'\n",
+        );
+        let mut entries = good_entries(&manifest);
+        entries.push(("test.so".into(), b"native-library".to_vec()));
+        let sums = sums(
+            &entries
+                .iter()
+                .filter(|(name, _)| name != SUMS_NAME)
+                .map(|(name, data)| (name.as_str(), data.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        entries
+            .iter_mut()
+            .find(|(name, _)| name == SUMS_NAME)
+            .unwrap()
+            .1 = sums.into_bytes();
+        let package = open(&build(&entries), None).unwrap();
+        assert_eq!(package.entries["test.so"], b"native-library");
+        entries
+            .iter_mut()
+            .find(|(name, _)| name == "test.so")
+            .unwrap()
+            .1 = b"changed".to_vec();
+        assert!(open(&build(&entries), None).is_err());
+        entries.retain(|(name, _)| name != "test.so");
+        assert!(open(&build(&entries), None)
+            .unwrap_err()
+            .0
+            .contains("missing"));
     }
 }
 

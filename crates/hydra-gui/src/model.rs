@@ -115,6 +115,8 @@ pub struct DownloadItem {
     #[serde(skip)]
     pub conns: Vec<ConnRow>,
     #[serde(skip)]
+    pub plugin_details: Vec<Vec<String>>,
+    #[serde(skip)]
     pub status_line: String,
     /// Shut down, log off or sleep the computer once this download (and any
     /// virus scan) finishes — the per-download analogue of a queue's

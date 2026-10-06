@@ -21,3 +21,6 @@ pub use request::{
     RefreshedTrack, Resolve, ResolveRequest,
 };
 pub use select::{select, AudioPref, Preferences, Selection};
+
+pub use manifest::{InputAction, NativeModule};
+pub use plan::{Transfer, TransferDetails, TransferFile, TransferOutput};
