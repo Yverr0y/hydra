@@ -14,14 +14,15 @@ import time
 import unittest
 import urllib.parse
 
-import libtorrent as lt
-
 LIBRARY = Path(sys.argv.pop(1)).resolve()
 EMIT = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)
 POLL = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64))
 NATIVE = ctypes.CDLL(str(LIBRARY))
 NATIVE.hydra_native_v1.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, EMIT, POLL, ctypes.c_void_p]
 NATIVE.hydra_native_v1.restype = ctypes.c_int32
+
+# Load Hydra first so the seeder wheel does not select its C++ runtime.
+import libtorrent as lt
 
 
 def call(method, request, stop=None, progress=None):

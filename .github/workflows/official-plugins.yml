@@ -69,7 +69,13 @@ jobs:
         shell: pwsh
         run: |
           $triplet = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64-windows-static' } else { 'x64-windows-static' }
-          vcpkg install "boost-headers:$triplet" "openssl:$triplet" "nlohmann-json:$triplet"
+          $ports = @(
+            'boost-headers', 'boost-asio', 'boost-config', 'boost-container', 'boost-crc',
+            'boost-date-time', 'boost-functional', 'boost-intrusive', 'boost-logic',
+            'boost-multi-index', 'boost-multiprecision', 'boost-pool', 'boost-predef',
+            'boost-range', 'boost-smart-ptr', 'boost-system', 'openssl', 'nlohmann-json'
+          )
+          vcpkg install ($ports | ForEach-Object { "${_}:$triplet" })
           "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
           "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
       - name: Test resolver and build native package

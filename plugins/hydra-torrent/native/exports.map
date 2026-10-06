@@ -1,0 +1,4 @@
+{
+    global: hydra_native_v1;
+    local: *;
+};

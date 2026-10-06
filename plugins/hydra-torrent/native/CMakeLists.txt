@@ -29,6 +29,11 @@ set_target_properties(hydra-torrent-native PROPERTIES PREFIX "" CXX_VISIBILITY_P
 target_include_directories(hydra-torrent-native PRIVATE ../../../crates/hydra-plugin-api/include)
 target_compile_features(hydra-torrent-native PRIVATE cxx_std_17)
 target_link_libraries(hydra-torrent-native PRIVATE LibtorrentRasterbar::torrent-rasterbar nlohmann_json::nlohmann_json)
+if(HYDRA_STATIC_ENGINE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Bind bundled dependencies locally, including OpenSSL ARM64 archive relocations.
+    target_link_options(hydra-torrent-native PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
+    set_property(TARGET hydra-torrent-native APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
+endif()
 if(MSVC)
     target_compile_options(hydra-torrent-native PRIVATE /W4 /WX)
 else()
