@@ -46,6 +46,10 @@
   - [Interactive Queue Manager (TUI)](#interactive-queue-manager-tui)
   - [Remote Checksum Lookup & Verification](#remote-checksum-lookup--verification)
   - [Portable GUI Profile](#portable-gui-profile)
+- [Plugins](#plugins)
+  - [Plugin architecture](#plugin-architecture)
+  - [Sandbox and native trust](#sandbox-and-native-trust)
+  - [Plugin inputs and authoring](#plugin-inputs-and-authoring)
 - [Benchmark](#benchmark)
   - [A fair 100 ms path](#a-fair-100-ms-path)
   - [Four public mirrors](#four-public-mirrors)
@@ -663,6 +667,114 @@ reads that file and launches `hydra-gui --minimized --config <dir>`. It is off b
 because the registration is per user: switching it on takes browser capture away from any
 ordinary Hydra install on the same account, and switching it off hands it back. `HYDRA_CONFIG`
 overrides the pointer file for scripted setups.
+
+---
+
+## Plugins
+
+Hydra plugins add download sources and protocol engines through a shared API used by
+both the CLI and desktop app. Community authors build and install a `.hyaplugin`
+package; plugins using the existing API do not need changes to Hydra's crates.
+The package contains a manifest, a Wasm module, and any declared native libraries.
+
+### Plugin architecture
+
+```mermaid
+flowchart TD
+    Hydra["HYDRA GUI / CLI"] --> Runtime["Plugin manager and Wasm runtime"]
+    Runtime --> Resolver["Source resolvers: YouTube, media URLs"]
+    Runtime --> Protocol["Protocol providers: Torrent"]
+    Runtime -.-> Storage["Future storage providers: S3, WebDAV"]
+    Resolver --> Plans["Validated download plans"]
+    Protocol --> Plans
+    Storage -.-> Plans
+    Plans --> Coordinator["Hydra transfer coordination"]
+    Coordinator --> Engine["HTTP / FTP engine and HLS / DASH transfers"]
+    Coordinator --> Native["Trusted native backend: libtorrent"]
+    Engine --> Scheduler["Adaptive concurrency, range stealing, stall detection"]
+    Native --> Pieces["Peer sessions, piece selection and verification"]
+    Scheduler --> Result["Files, resume state, progress and logs"]
+    Pieces --> Result
+```
+
+**Resolvers** return URLs, tracks, headers and output descriptions. Hydra downloads
+those sources through its existing transport and media engines. **Native transfer
+plugins** return an engine identifier, file list and opaque engine metadata; Hydra
+coordinates their destination, selection, cancellation, rate limits and progress.
+The torrent plugin imports libtorrent as a library inside Hydra's process, where
+libtorrent handles peer discovery, torrent pieces and verification. Hydra's byte
+range scheduler applies to its own HTTP/FTP transfers.
+
+Storage providers are an extension direction: an author could resolve authorized
+object URLs or implement a native transfer backend. S3, WebDAV, SFTP and IPFS in
+this architectural idea are possible future providers. The current API provides
+resolver plans and native transfers; it has no separate storage-provider hook.
+
+### Sandbox and native trust
+
+> **Wasm plugins are sandboxed; native modules are trusted in-process components.**
+
+Wasm code runs with memory and execution limits. Network requests, cookies,
+plugin data, approved external tools and selected-file reads go through Hydra's
+host API and permission checks. Choosing a local file authorizes that input;
+it does not give the Wasm module unrestricted access to the filesystem.
+
+A native module is an OS/architecture-specific `.dll`, `.so` or `.dylib`, declared
+in `[[native_modules]]` and authorized by `permissions.native`. Hydra checks the
+installed library's hash before loading it. Native code runs with Hydra's OS
+permissions, outside the Wasm sandbox, and can affect or crash the host process.
+A package containing native code therefore requires trust in that component.
+Package signatures authenticate the publisher and package contents; they do not
+sandbox native code or certify that it is safe.
+
+### Plugin inputs and authoring
+
+URL claims choose candidate resolvers; the resolver still validates the input.
+Plugins also declare generic file actions, so the app can add a plugin-provided
+button below OK and Cancel in Add URL:
+
+```toml
+claims = ["magnet:*", "*://*/*.torrent", "*://*/*.torrent?*"]
+
+[[input_actions]]
+label = "Browse Torrent File"
+extensions = ["torrent"]
+```
+
+The file extension declaration routes local inputs to the plugin in both frontends:
+
+```bash
+hydra ~/Downloads/example.torrent
+hydra 'magnet:?xt=urn:btih:YOUR_INFO_HASH'
+```
+
+Another plugin can declare **Browse X File** with its own extensions using the same
+API. Native plans can declare the headings and live rows of the progress detail
+table in both the CLI and GUI. Hydra keeps the standard progress display,
+dialog styling and controls. Leveled plugin logs are
+available through **Help → Logs**; `HYDRA_LOG=debug` enables debugging details.
+
+Create, build, validate and install a plugin with the authoring CLI:
+
+```bash
+hydra-plugin init my-plugin --language rust
+hydra-plugin build my-plugin --output my-plugin.hyaplugin
+hydra-plugin validate my-plugin.hyaplugin
+hydra plugin install my-plugin.hyaplugin
+```
+
+Native libraries must be built for each target platform and included before
+packaging. Official desktop releases include YouTube and the signed torrent
+package matching the OS and CPU architecture. On first launch Hydra installs
+these plugins automatically. Application updates carry newer plugin versions;
+startup sync preserves plugin settings, saved data and disabled or removed plugins.
+Wasm plugins remain sandboxed; the bundled torrent library is a trusted in-process
+component signed by Hydra. On Linux, native plugins require a dynamically linked Hydra host: use
+the CLI included in the desktop bundle, a distro package, or a GNU-target source
+build. The standalone static musl CLI supports Wasm plugins but cannot load native
+libraries. See the [Rust guest SDK](crates/hydra-plugin-sdk/),
+[native ABI](crates/hydra-plugin-api/include/hydra-native.h), and
+[torrent plugin](plugins/hydra-torrent/) for working examples.
 
 ---
 

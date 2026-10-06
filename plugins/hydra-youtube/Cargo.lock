@@ -30,14 +30,15 @@ dependencies = [
 
 [[package]]
 name = "hya-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "hya-plugin-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hya-plugin-api",
  "serde",
@@ -46,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "hydra-youtube"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "hya-plugin-sdk",

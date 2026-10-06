@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--native-build", type=Path, default=REPOSITORY / "target/torrent-native-static")
     parser.add_argument("--system-engine", action="store_true", help="Link an installed libtorrent; the resulting package requires its shared libraries")
+    parser.add_argument("--skip-native-build", action="store_true", help="Package an existing native build, including builds made in a compatibility container")
     args = parser.parse_args()
     system = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[platform.system()]
     architecture = {"arm64": "aarch64", "ARM64": "aarch64", "aarch64": "aarch64", "AMD64": "x86_64", "x86_64": "x86_64"}[platform.machine()]
@@ -31,8 +32,11 @@ def main():
                  f"-DHYDRA_STATIC_ENGINE={'OFF' if args.system_engine else 'ON'}"]
     for key_name in ["CMAKE_TOOLCHAIN_FILE", "VCPKG_TARGET_TRIPLET", "CMAKE_PREFIX_PATH"]:
         if os.environ.get(key_name): configure.append(f"-D{key_name}={os.environ[key_name]}")
-    subprocess.run(configure, check=True)
-    subprocess.run(["cmake", "--build", str(build), "--config", "Release", "--parallel", "4"], check=True)
+    if system == "windows":
+        configure += ["-A", "ARM64" if architecture == "aarch64" else "x64"]
+    if not args.skip_native_build:
+        subprocess.run(configure, check=True)
+        subprocess.run(["cmake", "--build", str(build), "--config", "Release", "--parallel", "4"], check=True)
     library = build / f"hydra-torrent-native.{suffix}"
     if not library.is_file():
         library = build / "Release" / library.name
