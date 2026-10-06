@@ -219,6 +219,10 @@ official_plugins_ok:
   WriteRegStr HKCU "Software\Classes\Hydra.PluginPackage\DefaultIcon" "" "$INSTDIR\hydra.ico"
   WriteRegStr HKCU "Software\Classes\Hydra.PluginPackage\shell\open\command" "" '$\"$INSTDIR\hydra-gui.exe$\" --install-plugin $\"%1$\"'
 
+  WriteRegStr HKCU "Software\Classes\hydra" "" "URL:Hydra Plugin Install"
+  WriteRegStr HKCU "Software\Classes\hydra" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\hydra\shell\open\command" "" '$\"$INSTDIR\hydra-gui.exe$\" $\"%1$\"'
+
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; Add/Remove Programs entry (HKCU to match the per-user install).
@@ -579,6 +583,10 @@ removed:
   ; Only when the files are actually gone: an entry removed over a directory
   ; that is still there takes the only offer of a retry with it.
   IfFileExists "$INSTDIR\hydra-gui.exe" uninstall_registry_kept
+  ReadRegStr $0 HKCU "Software\Classes\hydra\shell\open\command" ""
+  ${If} $0 == '$\"$INSTDIR\hydra-gui.exe$\" $\"%1$\"'
+    DeleteRegKey HKCU "Software\Classes\hydra"
+  ${EndIf}
   DeleteRegKey HKCU "Software\Classes\Hydra.PluginPackage"
   ReadRegStr $0 HKCU "Software\Classes\.hyaplugin" ""
   ${If} $0 == "Hydra.PluginPackage"

@@ -35,6 +35,7 @@ mod menubus;
 mod model;
 mod nmhost;
 mod picker;
+mod plugin_link;
 mod plugins;
 mod proxy;
 #[cfg(test)]
@@ -80,11 +81,15 @@ fn config_dir_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<Pa
 fn plugin_file_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<PathBuf>, String> {
     let mut args = args.into_iter().skip(1);
     while let Some(arg) = args.next() {
-        if arg == "--config" {
+        if arg == "--config" || arg == "--debug-plugin-catalog" {
             args.next();
             continue;
         }
-        if arg.to_str().is_some_and(|arg| arg.starts_with("--config=")) {
+        if arg.to_str().is_some_and(|arg| {
+            arg.starts_with("--config=")
+                || arg.starts_with("--debug-plugin-catalog=")
+                || arg.to_ascii_lowercase().starts_with("hydra:")
+        }) {
             continue;
         }
         let path = if arg == "--install-plugin" {
@@ -112,6 +117,52 @@ fn plugin_file_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<P
         return std::path::absolute(path)
             .map(Some)
             .map_err(|error| error.to_string());
+    }
+    Ok(None)
+}
+
+fn plugin_link_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<String>, String> {
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--config" || arg == "--install-plugin" || arg == "--debug-plugin-catalog" {
+            args.next();
+            continue;
+        }
+        if let Some(link) = arg
+            .to_str()
+            .filter(|arg| arg.to_ascii_lowercase().starts_with("hydra:"))
+        {
+            plugin_link::package_url(link)?;
+            return Ok(Some(link.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn debug_catalog_arg<I: IntoIterator<Item = OsString>>(args: I) -> Result<Option<String>, String> {
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--config" || arg == "--install-plugin" {
+            args.next();
+            continue;
+        }
+        let value = if arg == "--debug-plugin-catalog" {
+            args.next().and_then(|arg| arg.into_string().ok())
+        } else if let Some(value) = arg
+            .to_str()
+            .and_then(|arg| arg.strip_prefix("--debug-plugin-catalog="))
+        {
+            Some(value.to_string())
+        } else {
+            continue;
+        };
+        if !cfg!(debug_assertions) {
+            return Err("--debug-plugin-catalog is only available in debug builds".into());
+        }
+        return value
+            .filter(|value| !value.is_empty())
+            .map(Some)
+            .ok_or("--debug-plugin-catalog needs an HTTP loopback URL".into());
     }
     Ok(None)
 }
@@ -144,6 +195,21 @@ fn main() -> iced::Result {
         }
     }
 
+    match debug_catalog_arg(std::env::args_os()) {
+        #[cfg(debug_assertions)]
+        Ok(Some(url)) => {
+            if let Err(error) = hya_plugin::distribution::configure_debug_catalog(&url) {
+                eprintln!("hydra-gui: --debug-plugin-catalog: {error}");
+                std::process::exit(2);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("hydra-gui: {error}");
+            std::process::exit(2);
+        }
+    }
+
     // From here on a panic lands in this profile's session log.
     log::catch_panics();
 
@@ -157,7 +223,14 @@ fn main() -> iced::Result {
             std::process::exit(2);
         }
     };
-    if extbus::signal_existing(minimized, plugin_file.as_deref()) {
+    let plugin_link = match plugin_link_arg(std::env::args_os()) {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("hydra-gui: {error}");
+            std::process::exit(2);
+        }
+    };
+    if extbus::signal_existing(minimized, plugin_file.as_deref(), plugin_link.as_deref()) {
         return Ok(());
     }
 
@@ -292,6 +365,13 @@ fn boot() -> (App, Task<Message>) {
         .flatten()
         .map(|path| app.update(Message::InstallPluginFile(path)))
         .unwrap_or_else(Task::none);
+    let install_link = plugin_link_arg(std::env::args_os())
+        .ok()
+        .flatten()
+        .and_then(|link| plugin_link::package_url(&link).ok())
+        .map(|source| app.update(Message::InstallPluginSource(source)))
+        .unwrap_or_else(Task::none);
+    let install = Task::batch([install, install_link]);
     if start_hidden {
         (app, Task::batch([check, install, plugins::load()]))
     } else {
@@ -578,8 +658,68 @@ mod tests {
             parse(&["hydra-gui", "--config", "profile.hyaplugin"]).unwrap(),
             None
         );
+        assert_eq!(
+            parse(&[
+                "hydra-gui",
+                "hydra://install-plugin?url=https%3A%2F%2Fexample.com%2Fa.hyaplugin"
+            ])
+            .unwrap(),
+            None
+        );
         assert!(parse(&["hydra-gui", "--install-plugin"]).is_err());
         assert!(parse(&["hydra-gui", "--install-plugin", "file.txt"]).is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_catalog_arguments_accept_both_spellings_and_require_a_value() {
+        let parse = |args: &[&str]| super::debug_catalog_arg(args.iter().map(OsString::from));
+        let url = "http://localhost:8000/plugins.json";
+        assert_eq!(
+            parse(&["hydra-gui", "--debug-plugin-catalog", url]).unwrap(),
+            Some(url.into())
+        );
+        assert_eq!(
+            parse(&[
+                "hydra-gui",
+                "--debug-plugin-catalog=http://localhost:8000/plugins.json"
+            ])
+            .unwrap(),
+            Some(url.into())
+        );
+        assert!(parse(&["hydra-gui", "--debug-plugin-catalog"]).is_err());
+        assert!(parse(&["hydra-gui", "--debug-plugin-catalog="]).is_err());
+        assert_eq!(
+            parse(&["hydra-gui", "--config", "--debug-plugin-catalog"]).unwrap(),
+            None
+        );
+        let package_url = "http://localhost:8000/test.hyaplugin";
+        assert!(plugin_file_arg(
+            ["hydra-gui", "--debug-plugin-catalog", package_url].map(OsString::from)
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn browser_install_arguments_skip_profile_values_and_validate_links() {
+        let parse = |args: &[&str]| super::plugin_link_arg(args.iter().map(OsString::from));
+        let link = "hydra://install-plugin?url=https%3A%2F%2Fexample.com%2Fa.hyaplugin";
+        assert_eq!(parse(&["hydra-gui", link]).unwrap(), Some(link.into()));
+        assert_eq!(parse(&["hydra-gui", "--config", link]).unwrap(), None);
+        assert_eq!(
+            parse(&["hydra-gui", "--config=hydra:profile"]).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse(&["hydra-gui", "--install-plugin", "a.hyaplugin"]).unwrap(),
+            None
+        );
+        assert!(parse(&[
+            "hydra-gui",
+            "hydra://install-plugin?url=http://example.com/a.hyaplugin"
+        ])
+        .is_err());
     }
 
     #[test]

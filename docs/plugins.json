@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "name": "Hydra Plugin Catalog",
+  "plugins": [
+    {
+      "id": "hydra.youtube",
+      "name": "YouTube Downloader",
+      "description": "Download YouTube videos and playlists with your choice of video quality, audio format and subtitles. Uses yt-dlp for metadata and ffmpeg to combine tracks or convert audio.",
+      "version": "0.1.0",
+      "is_official": true,
+      "download": "https://github.com/ja7ad/hydra/releases/download/v1.0.6-rc/youtube-download.hyaplugin",
+      "homepage": "https://github.com/ja7ad/hydra/tree/main/plugins/hydra-youtube",
+      "author": "Hydra Team",
+      "image": "plugins/img/hydra.youtube/icon.svg",
+      "sha256": "55ed129c8945a928f62fcfe429cbfb7aac96e14b04946d7e887a2c0f773fcdc1",
+      "publisher_key": "RWTaGOCLthz+jwx/MfJUHw9YUABimWtJvF0ZwDVlRgfspb7sD7iy+x8x",
+      "api": 1
+    }
+  ]
+}

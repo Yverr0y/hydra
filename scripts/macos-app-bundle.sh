@@ -84,6 +84,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>${NUM_VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${NUM_VERSION}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+      <key>CFBundleURLName</key><string>Hydra Plugin Install</string>
+      <key>CFBundleURLSchemes</key><array><string>hydra</string></array>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict></array>
     <key>CFBundleDocumentTypes</key>
     <array><dict>
       <key>CFBundleTypeName</key><string>Hydra Plugin Package</string>

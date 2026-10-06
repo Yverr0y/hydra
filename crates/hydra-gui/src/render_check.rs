@@ -582,6 +582,16 @@ fn plugin_list_settings_and_info_render() {
             module_sha256: String::new(),
             previous: None,
         });
+    app.options.plugins.indexes = vec![
+        hya_plugin::distribution::IndexSource {
+            url: hya_plugin::distribution::DEFAULT_INDEX_URL.into(),
+            key: None,
+        },
+        hya_plugin::distribution::IndexSource {
+            url: "https://example.com/plugins.json".into(),
+            key: None,
+        },
+    ];
     let mut h = Harness::new(app, WinKind::Options, Size::new(760.0, 700.0), 1.0, true);
     let settings = h.app.options.plugins.installed[0].manifest.settings.clone();
     for (mode, name) in [
@@ -616,6 +626,29 @@ fn plugin_list_settings_and_info_render() {
                 physical(h.logical, h.scale),
             );
         }
+        h.app.options.plugins.detail = None;
+        let mut update = hya_plugin::distribution::parse_index(
+            include_bytes!("../../../docs/plugins.json"),
+            None,
+            None,
+        )
+        .unwrap()
+        .plugins
+        .remove(0);
+        update.version = "0.2.0".into();
+        h.app.options.plugins.updates = vec![update];
+        h.step("plugins-update-badge", &[]);
+        dump(
+            &format!("plugins-update-badge-{name}"),
+            &h.shown,
+            &h.shown,
+            physical(h.logical, h.scale),
+        );
+        h.app.options.plugins.busy = true;
+        h.step("plugins-update-busy", &[]);
+        h.app.options.plugins.busy = false;
+        h.app.options.plugins.updates.clear();
+        h.step("plugins-update-cleared", &[]);
         h.app.options.plugins.installed[0].signing = hya_plugin::package::Signing::Unsigned;
         h.app.options.plugins.detail = Some(Detail::Info("hydra.youtube".into()));
         h.step("plugins-info-unsigned", &[]);

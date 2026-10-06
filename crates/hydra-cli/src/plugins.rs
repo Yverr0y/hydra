@@ -337,9 +337,15 @@ pub enum Command {
         #[command(subcommand)]
         command: IndexCommand,
     },
-    /// List available versions from explicitly added indexes; never install silently.
+    /// List catalog updates, or install them after explicit permission consent.
     Update {
         id: Option<String>,
+        /// Install the listed updates and grant their displayed permissions.
+        #[arg(long)]
+        accept_permissions: bool,
+        /// Accept a publisher change while applying updates.
+        #[arg(long, requires = "accept_permissions")]
+        accept_publisher_change: bool,
     },
     /// Execute a development package with its declared capabilities, including exec.
     Test {
@@ -617,94 +623,228 @@ fn info_text(plugin: &hya_plugin::manager::Installed, color: bool) -> String {
     output
 }
 
+fn install_package(
+    manager: &mut Manager,
+    prepared: &hya_plugin::distribution::Prepared,
+    accept_permissions: bool,
+    accept_publisher_change: bool,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let package = Manager::inspect(&prepared.path)?;
+    if prepared.remote() && package.manifest.publisher_key.is_none() {
+        eprintln!("This package is unsigned; its checksum does not authenticate its publisher.");
+    }
+    eprintln!(
+        "{} ({})\n{}",
+        package.manifest.name,
+        package.manifest.id,
+        serde_json::to_string_pretty(&package.manifest.permissions)?
+    );
+    if !accept_permissions {
+        return Err(
+            "review the displayed permissions, then repeat with --accept-permissions".into(),
+        );
+    }
+    let id = manager.install_with_publisher_consent(
+        &prepared.path,
+        package.manifest.permissions,
+        accept_publisher_change,
+    )?;
+    if let Some(welcome) = package.manifest.welcome {
+        eprintln!(
+            "\nGetting started — {}\n{}",
+            crate::plugin_ui::clean(&package.manifest.name),
+            welcome
+                .lines()
+                .map(crate::plugin_ui::clean)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    Ok(id)
+}
+
 pub async fn run(command: &Command) -> std::process::ExitCode {
     let command = command.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))?;
-        match command {
-            Command::SyncOfficial { require_bundled } => {
-                if require_bundled && !hya_plugin::official::bundled() {
-                    return Err("this build contains no official plugins".into());
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut manager = Manager::open_with_official(hya_plugin::hydra_dir().join("plugins"))?;
+            match command {
+                Command::SyncOfficial { require_bundled } => {
+                    if require_bundled && !hya_plugin::official::bundled() {
+                        return Err("this build contains no official plugins".into());
+                    }
                 }
-            },
-            Command::Info { id, json } => {
-                let installed = manager.list().iter().find(|p|p.manifest.id==id).ok_or("unknown plugin")?;
-                if json { println!("{}", serde_json::to_string_pretty(installed)?); }
-                else {
-                    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() && std::env::var("TERM").as_deref() != Ok("dumb");
-                    print!("{}", info_text(installed, color));
+                Command::Info { id, json } => {
+                    let installed = manager
+                        .list()
+                        .iter()
+                        .find(|p| p.manifest.id == id)
+                        .ok_or("unknown plugin")?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(installed)?);
+                    } else {
+                        let color = std::io::stdout().is_terminal()
+                            && std::env::var_os("NO_COLOR").is_none()
+                            && std::env::var("TERM").as_deref() != Ok("dumb");
+                        print!("{}", info_text(installed, color));
+                    }
                 }
-            },
-            Command::Check { id } => manager.check(&id, hya_net::tls::TlsCapableConnector::new()?, frontend(&id))?,
-            Command::Logs { id } => print!("{}", manager.logs(&id)?),
-            Command::Config { id, secret } => {
-                if !std::io::stdin().is_terminal() { return Err("secret configuration requires an interactive terminal".into()); }
-                let value = rpassword::prompt_password(format!("Plugin {id} — {secret}: "))?;
-                manager.set_secret(&id, &secret, value)?;
-                manager.check(&id, hya_net::tls::TlsCapableConnector::new()?, frontend(&id))?;
-            }
-            Command::Rollback { id } => manager.rollback(&id)?,
-            Command::Grant { id, capability } => manager.permission(&id,&capability,true)?,
-            Command::Revoke { id, capability } => manager.permission(&id,&capability,false)?,
-            Command::ClearSession { id } => manager.clear_session(&id)?,
-            Command::Pack { path, output } => { let bytes = hya_plugin::package::pack(&path)?; std::fs::write(output,bytes)?; }
-            Command::Index { command } => {
-                let root = hya_plugin::hydra_dir().join("plugins");
-                match command {
-                    IndexCommand::List => println!("{}",serde_json::to_string_pretty(&hya_plugin::distribution::sources(&root)?)?),
-                    IndexCommand::Add {url,key} => println!("{}",serde_json::to_string_pretty(&hya_plugin::distribution::add(&root,hya_plugin::distribution::IndexSource {url,key})?)?),
-                    IndexCommand::Rm {url} => hya_plugin::distribution::remove(&root,&url)?,
+                Command::Check { id } => manager.check(
+                    &id,
+                    hya_net::tls::TlsCapableConnector::new()?,
+                    frontend(&id),
+                )?,
+                Command::Logs { id } => print!("{}", manager.logs(&id)?),
+                Command::Config { id, secret } => {
+                    if !std::io::stdin().is_terminal() {
+                        return Err("secret configuration requires an interactive terminal".into());
+                    }
+                    let value = rpassword::prompt_password(format!("Plugin {id} — {secret}: "))?;
+                    manager.set_secret(&id, &secret, value)?;
+                    manager.check(
+                        &id,
+                        hya_net::tls::TlsCapableConnector::new()?,
+                        frontend(&id),
+                    )?;
+                }
+                Command::Rollback { id } => manager.rollback(&id)?,
+                Command::Grant { id, capability } => manager.permission(&id, &capability, true)?,
+                Command::Revoke { id, capability } => {
+                    manager.permission(&id, &capability, false)?
+                }
+                Command::ClearSession { id } => manager.clear_session(&id)?,
+                Command::Pack { path, output } => {
+                    let bytes = hya_plugin::package::pack(&path)?;
+                    std::fs::write(output, bytes)?;
+                }
+                Command::Index { command } => {
+                    let root = hya_plugin::hydra_dir().join("plugins");
+                    match command {
+                        IndexCommand::List => println!(
+                            "{}",
+                            serde_json::to_string_pretty(&hya_plugin::distribution::sources(
+                                &root
+                            )?)?
+                        ),
+                        IndexCommand::Add { url, key } => println!(
+                            "{}",
+                            serde_json::to_string_pretty(&hya_plugin::distribution::add(
+                                &root,
+                                hya_plugin::distribution::IndexSource { url, key }
+                            )?)?
+                        ),
+                        IndexCommand::Rm { url } => hya_plugin::distribution::remove(&root, &url)?,
+                    }
+                }
+                Command::Update {
+                    id,
+                    accept_permissions,
+                    accept_publisher_change,
+                } => {
+                    let available = hya_plugin::distribution::updates(
+                        &hya_plugin::hydra_dir().join("plugins"),
+                        manager.list(),
+                        id.as_deref(),
+                    )?;
+                    if accept_permissions {
+                        for entry in available {
+                            let prepared = entry.prepare()?;
+                            println!(
+                                "Updated {}",
+                                install_package(
+                                    &mut manager,
+                                    &prepared,
+                                    true,
+                                    accept_publisher_change
+                                )?
+                            );
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&available)?);
+                    }
+                }
+                Command::Test { path, url } => {
+                    let temp = tempfile::tempdir()?;
+                    let mut test = Manager::open(temp.path().into())?;
+                    let package = Manager::inspect(&path)?;
+                    eprintln!(
+                        "Testing with declared capabilities, including exec: {}",
+                        serde_json::to_string(&package.manifest.permissions)?
+                    );
+                    let id = test.install(&path, package.manifest.permissions)?;
+                    let connector = hya_net::tls::TlsCapableConnector::new()?;
+                    test.check(&id, connector.clone(), frontend(&id))?;
+                    if let Some(url) = url {
+                        let result = test.resolve(
+                            || connector.clone(),
+                            hya_plugin_api::ResolveRequest {
+                                url,
+                                ..Default::default()
+                            },
+                            frontend,
+                        )?;
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    }
+                }
+                Command::List { json } => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(manager.list())?);
+                    } else {
+                        print!("{}", list_table(manager.list()));
+                    }
+                }
+                Command::Inspect { path } => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&Manager::inspect(&path)?.manifest)?
+                ),
+                Command::Install {
+                    path,
+                    sha256,
+                    accept_permissions,
+                    accept_publisher_change,
+                } => {
+                    let prepared =
+                        hya_plugin::distribution::Prepared::new(&path, sha256.as_deref())?;
+                    println!(
+                        "Installed {}",
+                        install_package(
+                            &mut manager,
+                            &prepared,
+                            accept_permissions,
+                            accept_publisher_change
+                        )?
+                    );
+                }
+                Command::Remove { id } => manager.remove(&id)?,
+                Command::Enable { id } => manager.enable(&id, true)?,
+                Command::Disable { id } => manager.enable(&id, false)?,
+                Command::Order { ids } => manager.order(&ids)?,
+                Command::Set { id, key, value } => {
+                    let value = serde_json::from_str::<Value>(&value).unwrap_or(Value::Text(value));
+                    manager.set(&id, &key, value)?;
+                    manager.check(
+                        &id,
+                        hya_net::tls::TlsCapableConnector::new()?,
+                        frontend(&id),
+                    )?;
+                }
+                Command::Resolve { url } => {
+                    let connector = hya_net::tls::TlsCapableConnector::new()?;
+                    let plan = manager.resolve(
+                        || connector.clone(),
+                        hya_plugin_api::ResolveRequest {
+                            url,
+                            ..Default::default()
+                        },
+                        frontend,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
                 }
             }
-            Command::Update { id } => {
-                let available = hya_plugin::distribution::updates(&hya_plugin::hydra_dir().join("plugins"),manager.list(),id.as_deref())?;
-                println!("{}",serde_json::to_string_pretty(&available)?);
-            }
-            Command::Test {path,url} => {
-                let temp = tempfile::tempdir()?;
-                let mut test = Manager::open(temp.path().into())?;
-                let package = Manager::inspect(&path)?;
-                eprintln!("Testing with declared capabilities, including exec: {}",serde_json::to_string(&package.manifest.permissions)?);
-                let id = test.install(&path,package.manifest.permissions)?;
-                let connector = hya_net::tls::TlsCapableConnector::new()?;
-                test.check(&id,connector.clone(),frontend(&id))?;
-                if let Some(url) = url {
-                    let result = test.resolve(|| connector.clone(),hya_plugin_api::ResolveRequest {url,..Default::default()},frontend)?;
-                    println!("{}",serde_json::to_string_pretty(&result)?);
-                }
-            }
-            Command::List { json } => {
-                if json { println!("{}", serde_json::to_string_pretty(manager.list())?); }
-                else { print!("{}", list_table(manager.list())); }
-            },
-            Command::Inspect { path } => println!("{}", serde_json::to_string_pretty(&Manager::inspect(&path)?.manifest)?),
-            Command::Install { path, sha256, accept_permissions, accept_publisher_change } => {
-                let prepared = hya_plugin::distribution::Prepared::new(&path, sha256.as_deref())?;
-                let path = prepared.path.clone();
-                let package = Manager::inspect(&path)?;
-                if prepared.remote() && package.manifest.publisher_key.is_none() { eprintln!("This package is unsigned; its checksum does not authenticate its publisher."); }
-                eprintln!("{} ({})\n{}", package.manifest.name, package.manifest.id, serde_json::to_string_pretty(&package.manifest.permissions)?);
-                if !accept_permissions { return Err("review permissions with `plugin inspect`, then install with --accept-permissions".into()); }
-                println!("Installed {}", manager.install_with_publisher_consent(&path, package.manifest.permissions, accept_publisher_change)?);
-                if let Some(welcome) = package.manifest.welcome { eprintln!("\nGetting started — {}\n{}", crate::plugin_ui::clean(&package.manifest.name), welcome.lines().map(crate::plugin_ui::clean).collect::<Vec<_>>().join("\n")); }
-            }
-            Command::Remove { id } => manager.remove(&id)?,
-            Command::Enable { id } => manager.enable(&id, true)?,
-            Command::Disable { id } => manager.enable(&id, false)?,
-            Command::Order { ids } => manager.order(&ids)?,
-            Command::Set { id, key, value } => {
-                let value = serde_json::from_str::<Value>(&value).unwrap_or(Value::Text(value));
-                manager.set(&id, &key, value)?;
-                manager.check(&id, hya_net::tls::TlsCapableConnector::new()?, frontend(&id))?;
-            }
-            Command::Resolve { url } => {
-                let connector = hya_net::tls::TlsCapableConnector::new()?;
-                let plan = manager.resolve(|| connector.clone(), hya_plugin_api::ResolveRequest { url, ..Default::default() }, frontend)?;
-                println!("{}", serde_json::to_string_pretty(&plan)?);
-            }
-        }
-        Ok(())
-    }).await;
+            Ok(())
+        },
+    )
+    .await;
     match result {
         Ok(Ok(())) => std::process::ExitCode::SUCCESS,
         Ok(Err(e)) => {
@@ -721,6 +861,85 @@ pub async fn run(command: &Command) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_update_arguments_require_explicit_permission_consent() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "hydra",
+            "plugin",
+            "update",
+            "community.video",
+            "--accept-permissions",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command,
+            Some(crate::cli::Command::Plugin {
+                command: Command::Update { id: Some(id), accept_permissions: true, accept_publisher_change: false }
+            }) if id == "community.video"));
+        assert!(crate::cli::Cli::try_parse_from([
+            "hydra",
+            "plugin",
+            "update",
+            "--accept-publisher-change",
+        ])
+        .is_err());
+        let cli = crate::cli::Cli::try_parse_from(["hydra", "plugin", "update"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(crate::cli::Command::Plugin {
+                command: Command::Update {
+                    accept_permissions: false,
+                    ..
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn package_updates_require_consent_and_preserve_settings_and_rollback() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let module = wat::parse_str(
+            r#"(module
+            (memory (export "memory") 1)
+            (func (export "hydra_api") (result i32) i32.const 1)
+            (func (export "hydra_alloc") (param i32) (result i32) i32.const 0)
+            (func (export "hydra_call") (param i32 i32 i32 i32) (result i64) i64.const 0))"#,
+        )
+        .unwrap();
+        std::fs::write(source.path().join("plugin.wasm"), module).unwrap();
+        let archive = source.path().join("release.hyaplugin");
+        let mut manager = Manager::open(root.path().join("plugins")).unwrap();
+        for version in ["1.0.0", "1.1.0"] {
+            std::fs::write(source.path().join("hydra-plugin.toml"), format!(
+                "id='community.video'\nname='Community Video'\nversion='{version}'\napi=1\nmodule='plugin.wasm'\nwelcome='Choose your quality.'\n[[settings]]\nkey='quality'\nlabel='Quality'\ntype='text'\ndefault='best'\n"
+            )).unwrap();
+            let bytes = hya_plugin::package::pack(source.path()).unwrap();
+            std::fs::write(&archive, &bytes).unwrap();
+            let prepared = hya_plugin::distribution::Prepared::new(
+                archive.to_str().unwrap(),
+                Some(&hya_plugin::package::sha256_hex(&bytes)),
+            )
+            .unwrap();
+            assert!(install_package(&mut manager, &prepared, false, false).is_err());
+            assert_eq!(
+                install_package(&mut manager, &prepared, true, false).unwrap(),
+                "community.video"
+            );
+            if version == "1.0.0" {
+                manager
+                    .set("community.video", "quality", Value::Text("custom".into()))
+                    .unwrap();
+            }
+        }
+        let plugin = &manager.list()[0];
+        assert_eq!(plugin.manifest.version, "1.1.0");
+        assert_eq!(plugin.settings["quality"], Value::Text("custom".into()));
+        assert_eq!(plugin.previous.as_ref().unwrap().manifest.version, "1.0.0");
+        manager.rollback("community.video").unwrap();
+        assert_eq!(manager.list()[0].manifest.version, "1.0.0");
+    }
 
     #[test]
     fn list_table_shows_verified_signatures_and_unsigned_plugins() {

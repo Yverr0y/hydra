@@ -1,4 +1,4 @@
-//! Bounded HTTPS package downloads and explicitly configured signed indexes.
+//! Bounded HTTPS package downloads, the default catalog, and user-added mirrors.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -6,6 +6,73 @@ use hya_plugin_api::{ErrorCode, PluginError};
 use serde::{Deserialize, Serialize};
 
 use crate::{http, matcher::HostList, package};
+
+/// The permanent catalog shared by Hydra's website, desktop app and CLI.
+pub const DEFAULT_INDEX_URL: &str = "https://hydra.javad.dev/plugins.json";
+
+#[cfg(debug_assertions)]
+static DEBUG_CATALOG: std::sync::OnceLock<url::Url> = std::sync::OnceLock::new();
+
+#[cfg(debug_assertions)]
+fn debug_catalog_url(address: &str) -> Result<url::Url, PluginError> {
+    let url = url::Url::parse(address).map_err(error)?;
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(_)) => false,
+        None => false,
+    };
+    if url.scheme() != "http"
+        || !loopback
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(error(
+            "debug plugin catalogs require an HTTP localhost or IPv4 loopback URL without credentials",
+        ));
+    }
+    Ok(url)
+}
+
+/// Overrides the default catalog for a debug process and permits its local HTTP origin.
+///
+/// # Errors
+/// Returns an error for unsupported URLs or a second configuration attempt.
+#[cfg(debug_assertions)]
+pub fn configure_debug_catalog(address: &str) -> Result<(), PluginError> {
+    let url = debug_catalog_url(address)?;
+    DEBUG_CATALOG
+        .set(url)
+        .map_err(|_| error("debug plugin catalog is already configured"))
+}
+
+fn default_catalog_url() -> &'static str {
+    #[cfg(debug_assertions)]
+    if let Some(url) = DEBUG_CATALOG.get() {
+        return url.as_str();
+    }
+    DEFAULT_INDEX_URL
+}
+
+fn debug_distribution_url(url: &url::Url) -> bool {
+    #[cfg(debug_assertions)]
+    return DEBUG_CATALOG
+        .get()
+        .is_some_and(|catalog| catalog.origin() == url.origin());
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = url;
+        false
+    }
+}
+
+fn distribution_url(url: &url::Url) -> bool {
+    (url.scheme() == "https" || debug_distribution_url(url))
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
 
 fn error(e: impl std::fmt::Display) -> PluginError {
     PluginError::new(ErrorCode::InvalidInput, e.to_string())
@@ -21,7 +88,9 @@ pub struct Prepared {
 impl Prepared {
     /// Fetches HTTPS sources or inspects local packages without installing them.
     pub fn new(source: &str, sha256: Option<&str>) -> Result<Self, PluginError> {
-        let prepared = if source.starts_with("https://") {
+        let prepared = if url::Url::parse(source)
+            .is_ok_and(|url| url.scheme() == "https" || debug_distribution_url(&url))
+        {
             let bytes = fetch(source)?;
             package::open(&bytes, sha256).map_err(error)?;
             let mut file = tempfile::NamedTempFile::new().map_err(error)?;
@@ -59,11 +128,7 @@ impl Prepared {
 /// Fetches a public HTTPS distribution document through Hydra's transport.
 pub fn fetch(address: &str) -> Result<Vec<u8>, PluginError> {
     let url = url::Url::parse(address).map_err(error)?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
+    if !distribution_url(&url) {
         return Err(error(
             "distribution URLs must use HTTPS without credentials",
         ));
@@ -71,7 +136,16 @@ pub fn fetch(address: &str) -> Result<Vec<u8>, PluginError> {
     let connector = hya_net::tls::TlsCapableConnector::new().map_err(error)?;
     let mut policy = http::HttpPolicy {
         proxy: None,
-        http: HostList::parse(&["*".into()]).map_err(error)?,
+        http: HostList::parse(&[if debug_distribution_url(&url) {
+            format!(
+                "{}:{}",
+                url.host_str().unwrap_or_default(),
+                url.port_or_known_default().unwrap_or(80)
+            )
+        } else {
+            "*".into()
+        }])
+        .map_err(error)?,
         cookies: HostList::parse(&[]).map_err(error)?,
         user_cookies: hya_net::CookieJar::new(),
         session: hya_net::CookieJar::new(),
@@ -90,7 +164,9 @@ pub fn fetch(address: &str) -> Result<Vec<u8>, PluginError> {
             body_b64: None,
         },
     ))?;
-    if response.status != 200 || !response.url.starts_with("https://") {
+    if response.status != 200
+        || !url::Url::parse(&response.url).is_ok_and(|url| distribution_url(&url))
+    {
         return Err(error(format!(
             "distribution download returned {}",
             response.status
@@ -121,27 +197,36 @@ pub struct IndexSource {
     pub url: String,
     pub key: Option<String>,
 }
-/// A publisher's distribution catalog; Hydra supplies no default catalog.
+/// A publisher's distribution catalog in JSON or TOML format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub schema: u32,
     pub name: String,
     pub plugins: Vec<Entry>,
 }
-/// A package advertised by an index, pinned to its exact archive digest.
+/// A package advertised by an index, with optional archive and publisher pins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
     pub name: String,
     pub version: String,
+    #[serde(alias = "download")]
     pub package: String,
-    pub sha256: String,
+    pub sha256: Option<String>,
     pub publisher_key: Option<String>,
     pub api: i32,
     pub min_hydra: Option<String>,
+    #[serde(alias = "description")]
     pub summary: Option<String>,
+    /// Whether the catalog lists this as a Hydra-maintained plugin.
+    #[serde(default)]
+    pub is_official: bool,
 }
 impl IndexSource {
+    /// Whether this source is the permanent default, including equivalent URL spellings.
+    pub fn is_default(&self) -> bool {
+        is_default_url(&self.url)
+    }
     /// Downloads an index, verifying its signature against the user's pinned key.
     pub fn load(&self) -> Result<Index, PluginError> {
         let bytes = fetch(&self.url)?;
@@ -170,16 +255,22 @@ pub fn parse_index(
         let key = minisign_verify::PublicKey::from_base64(key).map_err(error)?;
         key.verify(bytes, &signature, false).map_err(error)?;
     }
-    let index: Index = toml::from_str(std::str::from_utf8(bytes).map_err(error)?).map_err(error)?;
+    let text = std::str::from_utf8(bytes).map_err(error)?;
+    let index: Index = if text.trim_start().starts_with('{') {
+        serde_json::from_str(text).map_err(error)?
+    } else {
+        toml::from_str(text).map_err(error)?
+    };
     if index.schema != 1 || index.name.trim().is_empty() {
         return Err(error("unsupported or unnamed index"));
     }
     let mut ids = std::collections::BTreeSet::new();
     for entry in &index.plugins {
         if !ids.insert(&entry.id)
-            || entry.sha256.len() != 64
-            || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-            || !entry.package.starts_with("https://")
+            || entry.sha256.as_ref().is_some_and(|hash| {
+                hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            || !url::Url::parse(&entry.package).is_ok_and(|url| distribution_url(&url))
         {
             return Err(error("invalid or duplicate index entry"));
         }
@@ -190,19 +281,40 @@ pub fn parse_index(
     }
     Ok(index)
 }
-/// Reads only explicitly added index sources.
-pub fn sources(root: &Path) -> Result<Vec<IndexSource>, PluginError> {
+fn is_default_url(address: &str) -> bool {
+    url::Url::parse(address)
+        .is_ok_and(|url| url.as_str() == DEFAULT_INDEX_URL || url.as_str() == default_catalog_url())
+}
+
+fn mirrors(root: &Path) -> Result<Vec<IndexSource>, PluginError> {
     match std::fs::read(root.join("indexes.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(error),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(error(e)),
     }
 }
+
+/// Returns the permanent default catalog followed by the user's mirrors.
+pub fn sources(root: &Path) -> Result<Vec<IndexSource>, PluginError> {
+    let mut list = vec![IndexSource {
+        url: default_catalog_url().into(),
+        key: None,
+    }];
+    list.extend(
+        mirrors(root)?
+            .into_iter()
+            .filter(|source| !source.is_default()),
+    );
+    Ok(list)
+}
 /// Adds a verified index, or replaces its explicitly supplied verification key.
 pub fn add(root: &Path, source: IndexSource) -> Result<Index, PluginError> {
+    if source.is_default() {
+        return Err(error("the default plugin catalog is read-only"));
+    }
     let index = source.load()?;
-    let mut list = sources(root)?;
-    list.retain(|s| s.url != source.url);
+    let mut list = mirrors(root)?;
+    list.retain(|s| !s.is_default() && s.url != source.url);
     list.push(source);
     crate::manager::write_atomic(
         &root.join("indexes.json"),
@@ -212,8 +324,11 @@ pub fn add(root: &Path, source: IndexSource) -> Result<Index, PluginError> {
 }
 /// Removes an index source without changing any installed plugin.
 pub fn remove(root: &Path, url: &str) -> Result<(), PluginError> {
-    let mut list = sources(root)?;
-    list.retain(|s| s.url != url);
+    if is_default_url(url) {
+        return Err(error("the default plugin catalog cannot be removed"));
+    }
+    let mut list = mirrors(root)?;
+    list.retain(|s| !s.is_default() && s.url != url);
     crate::manager::write_atomic(
         &root.join("indexes.json"),
         &serde_json::to_vec(&list).map_err(error)?,
@@ -224,7 +339,7 @@ impl Entry {
     /// Fetches exactly the advertised package, including its publisher and version.
     pub fn prepare(&self) -> Result<Prepared, PluginError> {
         compatible(self.api, self.min_hydra.as_deref())?;
-        let prepared = Prepared::new(&self.package, Some(&self.sha256))?;
+        let prepared = Prepared::new(&self.package, self.sha256.as_deref())?;
         let package = crate::manager::Manager::inspect(&prepared.path)?;
         if package.manifest.id != self.id
             || package.manifest.version != self.version
@@ -247,20 +362,53 @@ pub fn updates(
     installed: &[crate::manager::Installed],
     id: Option<&str>,
 ) -> Result<Vec<Entry>, PluginError> {
-    let mut updates = Vec::new();
+    if installed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut catalogs = Vec::new();
     for source in sources(root)? {
-        for entry in source.load()?.plugins {
-            if compatible(entry.api, entry.min_hydra.as_deref()).is_err()
-                || id.is_some_and(|id| id != entry.id)
-            {
+        catalogs.push((source.is_default(), source.load()?));
+    }
+    select_updates(catalogs, installed, id)
+}
+
+fn select_updates(
+    catalogs: Vec<(bool, Index)>,
+    installed: &[crate::manager::Installed],
+    id: Option<&str>,
+) -> Result<Vec<Entry>, PluginError> {
+    let mut selected: std::collections::BTreeMap<String, (bool, Entry)> = Default::default();
+    for (default, catalog) in catalogs {
+        for entry in catalog.plugins {
+            if !default && compatible(entry.api, entry.min_hydra.as_deref()).is_err() {
                 continue;
             }
-            if let Some(previous) = installed.iter().find(|p| p.manifest.id == entry.id) {
-                if semver::Version::parse(&entry.version).map_err(error)?
-                    > semver::Version::parse(&previous.manifest.version).map_err(error)?
-                {
-                    updates.push(entry);
+            let replace = match selected.get(&entry.id) {
+                None => true,
+                Some((previous_default, previous)) => {
+                    default
+                        || (!previous_default
+                            && semver::Version::parse(&entry.version).map_err(error)?
+                                > semver::Version::parse(&previous.version).map_err(error)?)
                 }
+            };
+            if replace {
+                selected.insert(entry.id.clone(), (default, entry));
+            }
+        }
+    }
+    let mut updates = Vec::new();
+    for (_, entry) in selected.into_values() {
+        if compatible(entry.api, entry.min_hydra.as_deref()).is_err()
+            || id.is_some_and(|id| id != entry.id)
+        {
+            continue;
+        }
+        if let Some(previous) = installed.iter().find(|p| p.manifest.id == entry.id) {
+            if semver::Version::parse(&entry.version).map_err(error)?
+                > semver::Version::parse(&previous.manifest.version).map_err(error)?
+            {
+                updates.push(entry);
             }
         }
     }
@@ -319,7 +467,10 @@ mod tests {
     #[test]
     fn index_source_removal_preserves_other_sources_and_rejects_corrupt_state() {
         let root = tempfile::tempdir().unwrap();
-        assert!(sources(root.path()).unwrap().is_empty());
+        let defaults = sources(root.path()).unwrap();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].url, DEFAULT_INDEX_URL);
+        assert!(defaults[0].is_default());
         let list = vec![
             IndexSource {
                 url: "https://example.com/a".into(),
@@ -337,9 +488,176 @@ mod tests {
         .unwrap();
         remove(root.path(), "https://example.com/a").unwrap();
         let left = sources(root.path()).unwrap();
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].url, list[1].url);
+        assert_eq!(left.len(), 2);
+        assert!(left[0].is_default());
+        assert_eq!(left[1].url, list[1].url);
         std::fs::write(root.path().join("indexes.json"), b"bad").unwrap();
         assert!(sources(root.path()).is_err());
+    }
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_catalogs_are_limited_to_explicit_http_loopback_origins() {
+        for url in [
+            "http://localhost:8000/plugins.json",
+            "http://127.0.0.1:8000/plugins.json",
+        ] {
+            assert!(debug_catalog_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "bad",
+            "http://example.com/plugins.json",
+            "http://192.168.1.2/plugins.json",
+            "http://[::1]:8000/plugins.json",
+            "https://localhost/plugins.json",
+            "file:///tmp/plugins.json",
+            "http://user:pass@localhost/plugins.json",
+            "http://localhost/plugins.json#fragment",
+        ] {
+            assert!(debug_catalog_url(url).is_err(), "{url}");
+        }
+        assert!(!debug_distribution_url(
+            &url::Url::parse("http://127.0.0.1/plugin.hyaplugin").unwrap()
+        ));
+    }
+
+    fn catalog(id: &str, version: &str) -> Index {
+        parse_index(
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "name": "Test", "plugins": [{
+                    "id": id, "name": id, "version": version,
+                    "download": "https://example.com/plugin.hyaplugin", "api": 1
+                }]
+            }))
+            .unwrap()
+            .as_slice(),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn installed(id: &str, version: &str) -> crate::manager::Installed {
+        serde_json::from_value(serde_json::json!({
+            "manifest": {"id": id, "name": id, "version": version, "api": 1, "module": "plugin.wasm"},
+            "directory": "plugins/test", "dev": false, "enabled": true, "grants": {}, "pins": {}
+        })).unwrap()
+    }
+
+    #[test]
+    fn json_indexes_accept_optional_pins_and_description_alias() {
+        let mut index = catalog("community.video", "1.0.0");
+        assert!(index.plugins[0].sha256.is_none());
+        assert!(index.plugins[0].publisher_key.is_none());
+        assert!(!index.plugins[0].is_official);
+        index.plugins[0].sha256 = Some("a".repeat(64));
+        index.plugins[0].publisher_key = Some("publisher".into());
+        let bytes = serde_json::to_vec(&index).unwrap();
+        let roundtrip = parse_index(&bytes, None, None).unwrap();
+        assert_eq!(roundtrip.plugins[0].sha256, index.plugins[0].sha256);
+        assert!(parse_index(b"{broken", None, None).is_err());
+        index.plugins[0].sha256 = Some("bad".into());
+        assert!(parse_index(&serde_json::to_vec(&index).unwrap(), None, None).is_err());
+    }
+
+    #[test]
+    fn default_catalog_is_read_only_and_cannot_be_shadowed_in_saved_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let default = IndexSource {
+            url: DEFAULT_INDEX_URL.into(),
+            key: Some("other".into()),
+        };
+        assert!(add(root.path(), default.clone()).is_err());
+        assert!(!root.path().join("indexes.json").exists());
+        for url in [
+            DEFAULT_INDEX_URL,
+            "https://HYDRA.JAVAD.DEV:443/plugins.json",
+        ] {
+            assert!(remove(root.path(), url).is_err());
+        }
+        std::fs::write(
+            root.path().join("indexes.json"),
+            serde_json::to_vec(&[default]).unwrap(),
+        )
+        .unwrap();
+        let sources = sources(root.path()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].key.is_none());
+        assert!(updates(root.path(), &[], None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn default_catalog_wins_duplicates_even_when_a_mirror_advertises_a_newer_version() {
+        let installed = [installed("hydra.youtube", "1.0.0")];
+        for default_first in [true, false] {
+            let default = (true, catalog("hydra.youtube", "1.1.0"));
+            let mirror = (false, catalog("hydra.youtube", "9.0.0"));
+            let catalogs = if default_first {
+                vec![default, mirror]
+            } else {
+                vec![mirror, default]
+            };
+            let updates = select_updates(catalogs, &installed, None).unwrap();
+            assert_eq!(updates.len(), 1);
+            assert_eq!(updates[0].version, "1.1.0");
+        }
+        let catalogs = vec![
+            (true, catalog("hydra.youtube", "1.0.0")),
+            (false, catalog("hydra.youtube", "9.0.0")),
+        ];
+        assert!(select_updates(catalogs, &installed, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mirrors_supply_one_newest_compatible_update_for_plugins_missing_from_default() {
+        let previous = [
+            installed("community.video", "1.0.0"),
+            installed("community.audio", "1.0.0"),
+        ];
+        let catalogs = vec![
+            (true, catalog("hydra.youtube", "1.0.0")),
+            (false, catalog("community.video", "2.0.0")),
+            (false, catalog("community.video", "1.1.0")),
+            (false, catalog("community.video", "3.0.0")),
+            (false, catalog("community.audio", "1.2.0")),
+        ];
+        let updates = select_updates(catalogs.clone(), &previous, Some("community.video")).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].version, "3.0.0");
+        assert_eq!(select_updates(catalogs, &previous, None).unwrap().len(), 2);
+        let mut future = catalog("community.video", "9.0.0");
+        future.plugins[0].min_hydra = Some("999.0.0".into());
+        let updates = select_updates(
+            vec![
+                (false, future.clone()),
+                (false, catalog("community.video", "1.1.0")),
+            ],
+            &previous,
+            None,
+        )
+        .unwrap();
+        assert_eq!(updates[0].version, "1.1.0");
+        assert!(select_updates(
+            vec![(true, future), (false, catalog("community.video", "1.1.0"))],
+            &previous,
+            None
+        )
+        .unwrap()
+        .is_empty());
+        assert!(select_updates(
+            vec![(false, catalog("community.video", "1.0.0"))],
+            &previous,
+            None
+        )
+        .unwrap()
+        .is_empty());
+        assert!(select_updates(
+            vec![(true, catalog("hydra.youtube", "2.0.0"))],
+            &previous,
+            None
+        )
+        .unwrap()
+        .is_empty());
     }
 }

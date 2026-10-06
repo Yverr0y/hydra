@@ -401,3 +401,58 @@ fn official_sync_accepts_source_builds_and_reports_missing_release_bundle() {
         hya_plugin::official::bundled(),
     );
 }
+
+#[test]
+fn default_catalog_is_listed_and_protected_while_mirrors_remain_removable() {
+    let root = tempfile::tempdir().unwrap();
+    let default = hya_plugin::distribution::DEFAULT_INDEX_URL;
+    let listed = run(root.path(), &["plugin", "index", "list"], true);
+    let sources: Vec<hya_plugin::distribution::IndexSource> =
+        serde_json::from_str(&listed).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].url, default);
+    run(root.path(), &["plugin", "index", "rm", default], false);
+    run(
+        root.path(),
+        &["plugin", "index", "add", default, "--key", "other-key"],
+        false,
+    );
+    let mirror = "https://example.com/plugins.json";
+    std::fs::write(
+        root.path().join("profile/plugins/indexes.json"),
+        serde_json::to_vec(&[hya_plugin::distribution::IndexSource {
+            url: mirror.into(),
+            key: None,
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+    let listed = run(root.path(), &["plugin", "index", "list"], true);
+    let sources: Vec<hya_plugin::distribution::IndexSource> =
+        serde_json::from_str(&listed).unwrap();
+    assert_eq!(sources.len(), 2);
+    run(root.path(), &["plugin", "index", "rm", mirror], true);
+    let listed = run(root.path(), &["plugin", "index", "list"], true);
+    let sources: Vec<hya_plugin::distribution::IndexSource> =
+        serde_json::from_str(&listed).unwrap();
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].is_default());
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn real_cli_installs_and_updates_from_an_isolated_http_catalog() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/plugins/catalog-e2e.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .args(["--skip-build", "--cli", env!("CARGO_BIN_EXE_hydra")])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS: real CLI HTTP install"));
+}

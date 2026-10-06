@@ -159,12 +159,12 @@ Type=Application
 Name=Hydra Download Manager
 GenericName=Download Manager
 Comment=Multi-connection download accelerator
-Exec=hydra-gui %f
+Exec=hydra-gui %u
 Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
 StartupWMClass=hydra
-MimeType=application/x-hydra-plugin;
+MimeType=x-scheme-handler/hydra;application/x-hydra-plugin;
 EOF
 
   # Start minimized (to tray) at login. Same basename as the per-user entry

@@ -207,6 +207,17 @@ pub fn options(enabled: bool) -> svg::Handle {
         .clone()
 }
 
+pub fn refresh(enabled: bool) -> svg::Handle {
+    static CACHE: OnceLock<[svg::Handle; 2]> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let make = |enabled| gradient_icon(
+            r#"<path d="M25 14 a9 9 0 0 0 -15.5 -5.5 M9.5 8.5 H15 M9.5 8.5 V3 M7 18 a9 9 0 0 0 15.5 5.5 M22.5 23.5 H17 M22.5 23.5 V29"/>"#,
+            "#38B6A0", "#4F8FE8", enabled,
+        );
+        [make(false), make(true)]
+    })[enabled as usize].clone()
+}
+
 pub fn scheduler(enabled: bool) -> svg::Handle {
     // Rasterized-icon handles are cached: rebuilding the SVG string every
     // frame re-hashed kilobytes per icon per redraw for identical pixels.

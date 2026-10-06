@@ -2,7 +2,8 @@
 
 Hydra's embeddable plugin host, licensed MIT OR Apache-2.0: a Wasm runtime,
 capability enforcement, package verification, plugin installation, and explicit
-distribution indexes. It depends on the permissively licensed transport and
+distribution indexes. Hydra includes `https://hydra.javad.dev/plugins.json` as
+the permanent default; user-added JSON and TOML catalogs act as mirrors. It depends on the permissively licensed transport and
 contract crates, with no dependency on the GPL application crates.
 
 ```toml
