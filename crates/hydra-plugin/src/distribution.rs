@@ -199,6 +199,7 @@ pub struct IndexSource {
 }
 /// A publisher's distribution catalog in JSON or TOML format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "Catalog")]
 pub struct Index {
     pub schema: u32,
     pub name: String,
@@ -210,7 +211,7 @@ pub struct Entry {
     pub id: String,
     pub name: String,
     pub version: String,
-    #[serde(alias = "download")]
+    #[serde(default)]
     pub package: String,
     pub sha256: Option<String>,
     pub publisher_key: Option<String>,
@@ -222,6 +223,96 @@ pub struct Entry {
     #[serde(default)]
     pub is_official: bool,
 }
+#[derive(Deserialize)]
+struct Catalog {
+    schema: u32,
+    name: String,
+    plugins: Vec<CatalogEntry>,
+}
+
+#[derive(Deserialize)]
+struct CatalogEntry {
+    #[serde(flatten)]
+    entry: Entry,
+    download: Option<Downloads>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Downloads {
+    Link(String),
+    Choices(Vec<Download>),
+}
+
+#[derive(Deserialize)]
+struct Download {
+    caption: String,
+    link: String,
+    platform: Option<String>,
+    sha256: Option<String>,
+}
+
+impl Catalog {
+    fn resolve(self, platform: &str) -> Result<Index, PluginError> {
+        let mut plugins = Vec::with_capacity(self.plugins.len());
+        for CatalogEntry {
+            mut entry,
+            download,
+        } in self.plugins
+        {
+            match download {
+                Some(Downloads::Link(link)) => entry.package = link,
+                Some(Downloads::Choices(choices)) => {
+                    if choices.is_empty()
+                        || choices.iter().any(|choice| {
+                            choice.caption.trim().is_empty()
+                                || choice
+                                    .platform
+                                    .as_ref()
+                                    .is_some_and(|value| value.trim().is_empty())
+                                || !url::Url::parse(&choice.link).is_ok_and(|url| {
+                                    distribution_url(&url)
+                                        && url.fragment().is_none()
+                                        && url.path().to_ascii_lowercase().ends_with(".hyaplugin")
+                                })
+                                || choice.sha256.as_ref().is_some_and(|hash| {
+                                    hash.len() != 64
+                                        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                })
+                        })
+                    {
+                        return Err(error("invalid plugin downloads"));
+                    }
+                    let selected = choices
+                        .iter()
+                        .find(|choice| choice.platform.as_deref() == Some(platform))
+                        .or_else(|| choices.iter().find(|choice| choice.platform.is_none()));
+                    let Some(selected) = selected else { continue };
+                    entry.package.clone_from(&selected.link);
+                    if selected.sha256.is_some() {
+                        entry.sha256.clone_from(&selected.sha256);
+                    }
+                }
+                None => {}
+            }
+            plugins.push(entry);
+        }
+        Ok(Index {
+            schema: self.schema,
+            name: self.name,
+            plugins,
+        })
+    }
+}
+
+impl TryFrom<Catalog> for Index {
+    type Error = PluginError;
+
+    fn try_from(catalog: Catalog) -> Result<Self, Self::Error> {
+        catalog.resolve(&crate::native::platform())
+    }
+}
+
 impl IndexSource {
     /// Whether this source is the permanent default, including equivalent URL spellings.
     pub fn is_default(&self) -> bool {
@@ -518,6 +609,69 @@ mod tests {
         assert!(!debug_distribution_url(
             &url::Url::parse("http://127.0.0.1/plugin.hyaplugin").unwrap()
         ));
+    }
+
+    #[test]
+    fn platform_downloads_select_matching_package_and_checksum() {
+        for platform in [
+            "linux-aarch64",
+            "linux-x86_64",
+            "macos-aarch64",
+            "macos-x86_64",
+            "windows-aarch64",
+            "windows-x86_64",
+        ] {
+            let catalog: Catalog =
+                serde_json::from_slice(include_bytes!("../../../docs/plugins.json")).unwrap();
+            let index = catalog.resolve(platform).unwrap();
+            let torrent = index
+                .plugins
+                .iter()
+                .find(|entry| entry.id == "hydra.torrent")
+                .unwrap();
+            assert!(torrent
+                .package
+                .ends_with(&format!("torrent-download-{platform}.hyaplugin")));
+            let source: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../../../docs/plugins.json")).unwrap();
+            let choice = source["plugins"][1]["download"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|choice| choice["platform"] == platform)
+                .unwrap();
+            assert_eq!(torrent.sha256.as_deref(), choice["sha256"].as_str());
+        }
+    }
+
+    #[test]
+    fn unsupported_platform_skips_native_plugin_and_keeps_universal_download() {
+        let catalog: Catalog =
+            serde_json::from_slice(include_bytes!("../../../docs/plugins.json")).unwrap();
+        let index = catalog.resolve("freebsd-x86_64").unwrap();
+        assert_eq!(index.plugins.len(), 1);
+        assert_eq!(index.plugins[0].id, "hydra.youtube");
+    }
+
+    #[test]
+    fn malformed_platform_downloads_are_rejected_even_on_another_platform() {
+        for download in serde_json::json!([
+            [], [{"caption": "", "link": "https://example.com/p.hyaplugin"}],
+            [{"caption": "Linux", "link": "http://example.com/p.hyaplugin"}],
+            [{"caption": "Linux", "link": "https://example.com/p.exe"}],
+            [{"caption": "Linux", "link": "https://example.com/p.hyaplugin#fragment"}],
+            [{"caption": "Linux", "link": "https://example.com/p.hyaplugin", "sha256": "bad"}],
+            [{"caption": "Linux", "link": "https://example.com/p.hyaplugin", "platform": ""}]
+        ])
+        .as_array()
+        .unwrap()
+        {
+            let mut source: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../../../docs/plugins.json")).unwrap();
+            source["plugins"][1]["download"] = download.clone();
+            let catalog: Catalog = serde_json::from_value(source).unwrap();
+            assert!(catalog.resolve("freebsd-x86_64").is_err());
+        }
     }
 
     fn catalog(id: &str, version: &str) -> Index {

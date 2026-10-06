@@ -14,7 +14,7 @@ The file has `schema: 1`, a catalog `name`, and a `plugins` array. Each entry ha
 | `description` | What the plugin does and any external tools it needs |
 | `version` | Plugin SemVer from the manifest, not Hydra's release tag |
 | `is_official` | `true` for Hydra-maintained plugins; community submissions use `false` |
-| `download` | Direct HTTPS URL of the released `.hyaplugin` package |
+| `download` | Array of downloads with `caption` and direct HTTPS `link` to a released `.hyaplugin` package; legacy URL strings are also accepted |
 | `homepage` | Source repository or project homepage |
 | `author` | Creator or team name |
 | `image` | Artwork path relative to `docs/`, inside `plugins/img/{id}/` |
@@ -22,6 +22,16 @@ The file has `schema: 1`, a catalog `name`, and a `plugins` array. Each entry ha
 | `sha256` | Optional SHA-256 of the complete released archive |
 | `publisher_key` | Optional Minisign public signing key, matching the package manifest |
 | `min_hydra` | Optional minimum Hydra version |
+
+Each download may include `platform` (for example `macos-aarch64` or
+`windows-x86_64`) and its own `sha256`. Omit `platform` for a universal package.
+Hydra prefers the exact operating-system/architecture match, then a universal
+package, and skips plugins with no compatible download. Use `macos`, `linux`
+or `windows` and `aarch64` or `x86_64`, matching native module platform keys.
+The website offers every caption in a package selector; its download and install
+buttons both use the selected link. A download checksum overrides the entry's
+checksum, so platform packages must each pin their own archive hash.
+Existing TOML indexes using `package` are still supported.
 
 `sha256` detects a changed or damaged download. It is not a secret and is not
 a signing key. `publisher_key` identifies the signer; the matching private key
@@ -50,7 +60,7 @@ Example record without the optional pins:
   "description": "Download videos from Example Video.",
   "version": "1.0.0",
   "is_official": false,
-  "download": "https://example.com/releases/community-video-1.0.0.hyaplugin",
+  "download": [{ "caption": "All platforms", "link": "https://example.com/releases/community-video-1.0.0.hyaplugin" }],
   "homepage": "https://example.com/community-video",
   "author": "Plugin Creator",
   "image": "plugins/img/community.video/icon.svg",

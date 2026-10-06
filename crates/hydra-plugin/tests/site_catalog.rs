@@ -20,9 +20,24 @@ fn official_site_index_matches_catalog_and_trusted_publisher() {
             .unwrap();
         assert_eq!(plugin["name"], entry.name);
         assert_eq!(plugin["version"], entry.version);
-        assert_eq!(plugin["download"], entry.package);
+        let downloads = plugin["download"].as_array().unwrap();
+        let selected = downloads
+            .iter()
+            .find(|download| {
+                download["platform"].as_str() == Some(hya_plugin::native::platform().as_str())
+            })
+            .or_else(|| {
+                downloads
+                    .iter()
+                    .find(|download| download["platform"].is_null())
+            })
+            .unwrap();
+        assert_eq!(selected["link"], entry.package);
         assert_eq!(entry.is_official, plugin["is_official"].as_bool().unwrap());
-        assert_eq!(entry.sha256.as_deref(), plugin["sha256"].as_str());
+        assert_eq!(
+            entry.sha256.as_deref(),
+            selected["sha256"].as_str().or(plugin["sha256"].as_str())
+        );
         assert_eq!(
             entry.publisher_key.as_deref(),
             plugin["publisher_key"].as_str()

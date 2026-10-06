@@ -1,4 +1,4 @@
-import { validateCatalog, searchPlugins, installLink } from './catalog.mjs';
+import { validateCatalog, searchPlugins, installLink, downloadChoices } from './catalog.mjs';
 
 const grid = document.getElementById('plugin-list');
 const count = document.getElementById('plugin-count');
@@ -36,16 +36,30 @@ function pluginCard(plugin) {
   }
   const homepage = element('a', 'homepage', 'Plugin homepage ↗');
   homepage.href = plugin.homepage;
+  const downloads = downloadChoices(plugin);
+  const picker = element('label', 'download-picker', 'Package for your device');
+  const select = element('select', 'download-select');
+  for (const [index, choice] of downloads.entries()) {
+    const option = element('option', '', choice.caption);
+    option.value = String(index);
+    select.append(option);
+  }
+  picker.append(select);
   const actions = element('div', 'card-actions');
   const download = element('a', 'button secondary', 'Download .hyaplugin');
-  download.href = plugin.download;
+  download.href = downloads[0].link;
   const install = element('a', 'button primary', 'Install in Hydra');
-  install.href = installLink(plugin);
+  install.href = installLink(downloads[0]);
+  select.addEventListener('change', () => {
+    const choice = downloads[Number(select.value)];
+    download.href = choice.link;
+    install.href = installLink(choice);
+  });
   install.addEventListener('click', () => {
     installStatus.textContent = `Your browser will ask to open Hydra to review ${plugin.name}. If Hydra does not open, download the .hyaplugin file and open it with Hydra, or use Options → Extensions & Plugins → Plugins.`;
   });
   actions.append(download, install);
-  card.append(header, element('p', 'description', plugin.description), details, homepage, actions);
+  card.append(header, element('p', 'description', plugin.description), details, homepage, picker, actions);
   return card;
 }
 

@@ -8,13 +8,69 @@
       "description": "Download YouTube videos and playlists with your choice of video quality, audio format and subtitles. Uses yt-dlp for metadata and ffmpeg to combine tracks or convert audio.",
       "version": "0.1.0",
       "is_official": true,
-      "download": "https://github.com/ja7ad/hydra/releases/download/v1.0.6-rc/youtube-download.hyaplugin",
+      "download": [
+        {
+          "caption": "All platforms",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.6-rc/youtube-download.hyaplugin"
+        }
+      ],
       "homepage": "https://github.com/ja7ad/hydra/tree/main/plugins/hydra-youtube",
       "author": "Hydra Team",
       "image": "plugins/img/hydra.youtube/icon.svg",
       "sha256": "55ed129c8945a928f62fcfe429cbfb7aac96e14b04946d7e887a2c0f773fcdc1",
       "publisher_key": "RWTaGOCLthz+jwx/MfJUHw9YUABimWtJvF0ZwDVlRgfspb7sD7iy+x8x",
       "api": 1
+    },
+    {
+      "id": "hydra.torrent",
+      "name": "Torrent Downloader",
+      "description": "Download magnet links and torrent files with the built-in libtorrent engine. Choose which files to save and set upload limits and seeding time. Uploads to peers also happen while downloading; seeding stops on completion by default.",
+      "version": "0.1.0",
+      "is_official": true,
+      "download": [
+        {
+          "caption": "Linux · ARM64",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-linux-aarch64.hyaplugin",
+          "platform": "linux-aarch64",
+          "sha256": "36ee36e38eeaca5be29ab4a50968d37ecb46fc3985978cef2f0a9d5e0b79f300"
+        },
+        {
+          "caption": "Linux · x64",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-linux-x86_64.hyaplugin",
+          "platform": "linux-x86_64",
+          "sha256": "0070ff3912552a0f6f2d8c8e067010ebc4dbd23415af91675feba78d3311ef1f"
+        },
+        {
+          "caption": "macOS · Apple silicon",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-macos-aarch64.hyaplugin",
+          "platform": "macos-aarch64",
+          "sha256": "0e67197879a612669cba94a2868816acd304e81481f30c72069ecfe261bc8ef8"
+        },
+        {
+          "caption": "macOS · Intel",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-macos-x86_64.hyaplugin",
+          "platform": "macos-x86_64",
+          "sha256": "5279bacd59456b0e06e5e1e76fc8b7c99765aeacdee19dfebf3a229c7d82ae12"
+        },
+        {
+          "caption": "Windows · ARM64",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-windows-aarch64.hyaplugin",
+          "platform": "windows-aarch64",
+          "sha256": "9c258b06d456428b4099e15666d0a3061cd1ba63d38fea12880bed940d63ae98"
+        },
+        {
+          "caption": "Windows · x64",
+          "link": "https://github.com/ja7ad/hydra/releases/download/v1.0.8-rc/torrent-download-windows-x86_64.hyaplugin",
+          "platform": "windows-x86_64",
+          "sha256": "87a1081cc44ab0b124c8db5e64ecc046c6680780658b3436dcd72de331da26ce"
+        }
+      ],
+      "homepage": "https://github.com/ja7ad/hydra/tree/main/plugins/hydra-torrent",
+      "author": "Hydra Team",
+      "image": "plugins/img/hydra.torrent/icon.svg",
+      "publisher_key": "RWTaGOCLthz+jwx/MfJUHw9YUABimWtJvF0ZwDVlRgfspb7sD7iy+x8x",
+      "api": 1,
+      "min_hydra": "1.0.7"
     }
   ]
 }

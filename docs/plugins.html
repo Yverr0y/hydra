@@ -39,7 +39,7 @@
   .catalog { padding-bottom: 48px; }
   .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 8px 0 24px; }
   .search { display: flex; flex-direction: column; gap: 8px; width: min(100%, 420px); font-size: 14px; }
-  input { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 13px 16px; color: var(--text); font: inherit; }
+  input, .download-select { width: 100%; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 13px 16px; color: var(--text); font: inherit; }
   input::placeholder { color: var(--dim); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
   #plugin-count { color: var(--dim); font: 13px "Geist Mono", monospace; white-space: nowrap; }
@@ -56,7 +56,10 @@
   dt { color: var(--dim); }
   dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
   .homepage { color: var(--accent); font-size: 14px; margin: 16px 0 24px; align-self: flex-start; }
+  .download-picker { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; color: var(--dim); font-size: 13px; }
+  .download-select { color-scheme: dark; font: 500 14px "Geist", system-ui, sans-serif; cursor: pointer; }
   .card-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card-actions .button { flex: 1; }
   .button { display: inline-flex; justify-content: center; align-items: center; border-radius: 8px; padding: 11px 15px; font: 600 13px "Geist",system-ui,sans-serif; cursor: pointer; border: 1px solid var(--line); }
   .primary { background: linear-gradient(100deg,#2dd4d4,#2596e8); color: #06282e; border: 0; }
   .primary:hover { color: #06282e; filter: brightness(1.1); }
@@ -119,7 +122,7 @@
     <p id="catalog-state" role="status">Loading plugins…</p>
     <button class="button secondary" id="catalog-retry" hidden>Try again</button>
     <noscript><p>Enable JavaScript to browse the catalog, or view the <a href="plugins.json">plugin list</a>.</p></noscript>
-    <p class="help">Install in Hydra opens the desktop app to review permissions before installation. If your browser cannot open Hydra, download the package and open it with Hydra, or add it in Options → Extensions &amp; Plugins → Plugins.</p>
+    <p class="help">Install in Hydra opens the desktop app to review permissions before installation. Choose the package for your operating system and processor. If your browser cannot open Hydra, download the package and open it with Hydra, or add it in Options → Extensions &amp; Plugins → Plugins.</p>
     <p id="install-status" role="status"></p>
   </section>
   <section class="wrap" aria-labelledby="index-heading">
