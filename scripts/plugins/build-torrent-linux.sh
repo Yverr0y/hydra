@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Docker must not create the Cargo target directory as root.
+mkdir -p target
+
 # Match the oldest desktop bundle's glibc floor, including the AppImage.
 docker run --rm -v "$PWD:/source" -w /source ubuntu:20.04 bash -euc '
   export DEBIAN_FRONTEND=noninteractive
