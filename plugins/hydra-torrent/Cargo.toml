@@ -1,0 +1,23 @@
+[package]
+name = "hydra-torrent"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[package.metadata.hydra]
+package-name = "torrent-download"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hya-plugin-sdk = { path = "../../crates/hydra-plugin-sdk" }
+base64 = "0.22"
+url = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,9 @@
+/target/
+/plugin.wasm
+/*.hyaplugin
+/.hydra-sdk/plugins/sdk/runtime/target/
+__pycache__/
+
+/*.dylib
+/*.so
+/*.dll
