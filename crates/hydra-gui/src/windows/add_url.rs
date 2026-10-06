@@ -4,7 +4,7 @@
 //! "Enter new address to download" — Add URL dialog.
 
 use crate::app::{App, El, Message, WinKind};
-use crate::windows::{check, dlg_btn, dlg_btn_primary};
+use crate::windows::{check, dlg_btn_sized};
 use crate::{i18n::tr, theme};
 use iced::widget::{column, container, pick_list, row, text, text_input};
 use iced::Length;
@@ -57,6 +57,7 @@ pub fn view(app: &App) -> El<'_> {
         label(tr("Address")),
         crate::windows::ext_hint(
             text_input("http://", &st.address)
+                .padding([5, 8])
                 .id(ADDRESS_ID)
                 .on_input(Message::AddrChanged)
                 .on_submit(Message::AddUrlOk)
@@ -67,6 +68,7 @@ pub fn view(app: &App) -> El<'_> {
         ),
     ]
     .spacing(GAP)
+    .height(28.0)
     .align_y(iced::Alignment::Center);
 
     let auth = check(st.use_auth, tr("Use authorization")).on_toggle(Message::AddrAuthToggled);
@@ -130,16 +132,23 @@ pub fn view(app: &App) -> El<'_> {
     };
     let cookies = row![
         label(tr("Cookies")),
-        text_input(
-            "name=value; name2=value2",
-            st.capture.cookies.as_deref().unwrap_or("")
+        container(
+            text_input(
+                "name=value; name2=value2",
+                st.capture.cookies.as_deref().unwrap_or("")
+            )
+            .padding([5, 8])
+            .on_input(Message::AddrCookies)
+            .size(theme::FONT_SIZE)
+            .style(theme::input)
+            .width(Length::Fill)
         )
-        .on_input(Message::AddrCookies)
-        .size(theme::FONT_SIZE)
-        .style(theme::input)
-        .width(Length::Fill),
+        .width(Length::Fill)
+        .height(28.0)
+        .center_y(28.0),
     ]
     .spacing(GAP)
+    .height(28.0)
     .align_y(iced::Alignment::Center);
 
     // A manifest is not a file: which rendition, which container, and — for
@@ -281,14 +290,37 @@ pub fn view(app: &App) -> El<'_> {
 
     // Nothing may be added while the address is still being read.
     let probing = st.stream_probing || st.metalink_probing || st.plugin_probing;
-    let buttons = column![
-        dlg_btn_primary(tr("OK"), (!probing).then_some(Message::AddUrlOk)),
-        dlg_btn(
+    let actions = crate::plugins::input_actions(app);
+    let button_width = actions
+        .iter()
+        .map(|(_, _, action)| action.label.as_str())
+        .chain([tr("OK"), tr("Cancel")].iter().map(String::as_str))
+        .map(crate::windows::btn_width)
+        .fold(0.0_f32, f32::max);
+    let mut buttons = column![
+        dlg_btn_sized(
+            tr("OK"),
+            (!probing).then_some(Message::AddUrlOk),
+            button_width,
+            true
+        ),
+        dlg_btn_sized(
             tr("Cancel"),
             app.win_of(WinKind::AddUrl).map(Message::CloseThis),
+            button_width,
+            false
         ),
     ]
     .spacing(8);
+
+    for (id, index, action) in actions {
+        buttons = buttons.push(dlg_btn_sized(
+            action.label,
+            (!probing).then_some(Message::PluginBrowse(id, index)),
+            button_width,
+            false,
+        ));
+    }
 
     // A mirror list is not a file either, and what it changes is worth seeing
     // before OK: how many files are about to be added, how many mirrors each
@@ -376,23 +408,97 @@ pub fn view(app: &App) -> El<'_> {
         plugins = plugins.push(text(tr("Reading plugin tracks…")).size(theme::FONT_SIZE));
     }
     if let Some(info) = &st.plugin_plan {
-        plugins = plugins.push(
-            iced::widget::scrollable(
-                text(plugin_title(info))
+        if let Some(transfer) = &info.plan.transfer {
+            let mut files = column![].spacing(4);
+            let mut selected_count = 0;
+            let mut selected_size = 0_u64;
+            for file in &transfer.files {
+                let index = file.index;
+                let selected = info
+                    .preferences
+                    .transfer_files
+                    .as_ref()
+                    .is_none_or(|files| files.contains(&index));
+                if selected {
+                    selected_count += 1;
+                    selected_size = selected_size.saturating_add(file.size);
+                }
+                files = files.push(
+                    row![
+                        check(selected, file.path.clone())
+                            .on_toggle(move |selected| Message::TransferFileSelected(
+                                index, selected
+                            ))
+                            .width(Length::Fill),
+                        text(crate::fmt::size2(file.size)).size(theme::FONT_SIZE)
+                    ]
+                    .spacing(GAP)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            let summary = format!(
+                "{} / {} · {}",
+                selected_count,
+                transfer.files.len(),
+                crate::fmt::size2(selected_size)
+            );
+            let content = column![
+                iced::widget::scrollable(
+                    text(
+                        info.plan
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| info.plan.id.clone())
+                    )
                     .size(theme::FONT_SIZE)
-                    .width(Length::Fill),
-            )
-            .height(title_height(info)),
-        );
-        plugins = plugins.push(
-            row![
-                iced::widget::space::horizontal().width(label_w()),
-                check(info.preferences.audio_only, tr("Audio only"))
-                    .on_toggle(Message::PluginAudioOnly),
+                    .width(Length::Fill)
+                )
+                .height(title_height(info)),
+                row![
+                    text(tr("Files")).size(theme::FONT_SIZE).width(Length::Fill),
+                    text(summary).size(theme::FONT_SIZE - 1.0)
+                ]
+                .spacing(GAP),
+                iced::widget::scrollable(files).height(list_height(
+                    transfer.files.len(),
+                    26.0,
+                    160.0
+                )),
             ]
-            .spacing(GAP)
-            .align_y(iced::Alignment::Center),
-        );
+            .spacing(GAP);
+            plugins = plugins.push(
+                container(content)
+                    .padding(10)
+                    .width(Length::Fill)
+                    .style(theme::panel),
+            );
+            if let Some(notice) = &transfer.notice {
+                plugins = plugins.push(
+                    iced::widget::scrollable(text(notice.clone()).size(theme::FONT_SIZE - 1.0))
+                        .height(32.0),
+                );
+            }
+        } else {
+            plugins = plugins.push(
+                iced::widget::scrollable(
+                    text(plugin_title(info))
+                        .size(theme::FONT_SIZE)
+                        .width(Length::Fill),
+                )
+                .height(title_height(info)),
+            );
+        }
+        if info.plan.transfer.is_none() {
+            plugins = plugins.push(
+                row![
+                    iced::widget::space::horizontal().width(label_w()),
+                    check(info.preferences.audio_only, tr("Audio only"))
+                        .on_toggle(Message::PluginAudioOnly),
+                ]
+                .spacing(GAP)
+                .align_y(iced::Alignment::Center),
+            );
+        }
         if info.preferences.audio_only {
             plugins = plugins.push(
                 row![
@@ -576,7 +682,7 @@ pub fn view(app: &App) -> El<'_> {
                     .height(list_height(subtitle_count(info), 22.0, 90.0)),
             );
         }
-        if !info.preferences.audio_only {
+        if !info.preferences.audio_only && info.plan.transfer.is_none() {
             plugins = plugins.push(
                 row![
                     label(tr("Container")),
@@ -671,6 +777,9 @@ pub(crate) fn plugin_panel_height(st: &crate::app::AddUrlState) -> f32 {
         return height;
     };
     height += GAP + title_height(info) + GAP + 18.0;
+    if let Some(transfer) = &info.plan.transfer {
+        return height + list_height(transfer.files.len(), 26.0, 160.0) + 84.0;
+    }
     if info.preferences.audio_only {
         height += 36.0;
     }

@@ -316,6 +316,8 @@ impl MenuAction {
 #[derive(Clone, Debug, Default)]
 pub struct AddUrlState {
     pub plugin_plan: Option<crate::plugins::PlanInfo>,
+    pub input_plugin: Option<String>,
+    pub plugin_ctl: Option<std::sync::Arc<hya_plugin::runtime::CallCtl>>,
     pub plugin_of: String,
     pub plugin_probing: bool,
     /// A cookie edit invalidates the session used by an in-flight inspection.
@@ -402,6 +404,7 @@ pub const METALINK_PANEL_ROWS: usize = 3;
 /// A capture parked behind the duplicate-confirmation dialog.
 #[derive(Clone, Debug)]
 pub struct PendingAdd {
+    pub plugin_plan: Option<crate::plugins::PlanInfo>,
     pub url: String,
     pub auth: Option<(String, String)>,
     pub capture: CaptureExtras,
@@ -1227,6 +1230,14 @@ pub enum Message {
     Plugin(crate::plugins::Message),
     InstallPluginFile(std::path::PathBuf),
     InstallPluginSource(String),
+    PluginBrowse(String, usize),
+    PluginFilePicked(String, Option<std::path::PathBuf>),
+    TransferFileSelected(u32, bool),
+    PluginProbeFinished(
+        String,
+        std::sync::Arc<hya_plugin::runtime::CallCtl>,
+        Box<Result<Option<crate::plugins::PlanInfo>, String>>,
+    ),
     PluginProbe,
     PluginAudioOnly(bool),
     PluginAudioFormat(String),
@@ -2648,6 +2659,23 @@ impl App {
     /// space its content asks for. The main window is the exception: it is
     /// resizable and reopens at whatever size it was left at, and that is
     /// remembered in OS points, so it converts back.
+    pub(crate) fn animation_interval_ms(&self) -> u64 {
+        if self.windows.values().any(|window| match window {
+            WinKind::Progress(id) => self.item(*id).is_some_and(|item| {
+                item.state.is_active()
+                    && item
+                        .plugin_plan
+                        .as_ref()
+                        .is_some_and(|info| info.plan.transfer.is_some())
+            }),
+            _ => false,
+        }) {
+            33
+        } else {
+            80
+        }
+    }
+
     fn window_size(&self, kind: WinKind) -> (f32, f32) {
         let scale = self.ui_scale();
         if kind == WinKind::Main {
@@ -2656,7 +2684,8 @@ impl App {
         let (w, h) = match kind {
             WinKind::Main => unreachable!("handled above"),
             WinKind::AddUrl => {
-                let mut h = 146.0;
+                let mut h: f32 = 156.0;
+                h = h.max(30.0 + (crate::plugins::input_actions(self).len() + 2) as f32 * 38.0);
                 // The cookie note is a real row, and a store path wraps to two
                 // lines at this width on every platform; one line while probing.
                 if self.add_url.cookies_importing {
@@ -2902,6 +2931,11 @@ impl App {
     }
 
     fn close_window(&mut self, kind: WinKind) -> Task<Message> {
+        if kind == WinKind::AddUrl {
+            if let Some(ctl) = &self.add_url.plugin_ctl {
+                ctl.cancel();
+            }
+        }
         if kind == WinKind::Options {
             if let Some(prompt) = self.options.plugins.prompt.take() {
                 let _ = prompt.reply.send(Err(hya_plugin_api::PluginError::new(
@@ -3521,6 +3555,7 @@ impl App {
             eta_secs: None,
             recorded_secs: None,
             conns: vec![],
+            plugin_details: vec![],
             status_line: String::new(),
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
@@ -3749,7 +3784,31 @@ impl App {
         if self.add_url.metalink.is_some() && self.add_url.metalink_of == url {
             return self.add_metalink_items();
         }
-        if let Err(e) = engine::parse_url(&url) {
+        let transfer = self
+            .add_url
+            .plugin_plan
+            .as_ref()
+            .filter(|_| self.add_url.plugin_of == url)
+            .is_some_and(|info| info.plan.transfer.is_some());
+        if transfer
+            && self.add_url.plugin_plan.as_ref().is_some_and(|info| {
+                info.preferences
+                    .transfer_files
+                    .as_ref()
+                    .is_some_and(Vec::is_empty)
+            })
+        {
+            self.add_url.error = Some("Select at least one transfer file.".into());
+            return self.resize_open(WinKind::AddUrl);
+        }
+        let plugin_resolved = self.add_url.plugin_plan.is_some() && self.add_url.plugin_of == url;
+        if let Err(e) = engine::parse_url(&url).map(|_| ()).or_else(|error| {
+            if plugin_resolved {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }) {
             self.add_url.error = Some(e);
             return self.resize_open(WinKind::AddUrl);
         }
@@ -3763,7 +3822,15 @@ impl App {
             .state
             .downloads
             .iter()
-            .find(|d| d.url == url)
+            .find(|d| {
+                d.url == url
+                    || (transfer
+                        && self.add_url.plugin_plan.as_ref().is_some_and(|new| {
+                            d.plugin_plan.as_ref().is_some_and(|existing| {
+                                existing.plugin == new.plugin && existing.plan.id == new.plan.id
+                            })
+                        }))
+            })
             .map(|d| d.id);
         let captured = self.add_url.capture.taken();
         // A manifest that was inspected becomes a STREAM item: the
@@ -3830,6 +3897,11 @@ impl App {
                 file.as_deref().unwrap_or("-")
             ));
             let pending = Box::new(PendingAdd {
+                plugin_plan: self
+                    .add_url
+                    .plugin_plan
+                    .clone()
+                    .filter(|_| self.add_url.plugin_of == self.add_url.address.trim()),
                 url,
                 auth,
                 capture: captured,
@@ -3852,9 +3924,7 @@ impl App {
             .filter(|_| self.add_url.plugin_of == self.add_url.address.trim());
         if let Some(info) = plugin_plan {
             self.name_new_item(id, name.clone());
-            if let Some(d) = self.item_mut(id) {
-                d.plugin_plan = Some(info);
-            }
+            self.apply_plugin_plan(id, info);
         }
         if let Some(si) = stream {
             self.name_new_item(id, name);
@@ -3867,6 +3937,28 @@ impl App {
         self.add_url = AddUrlState::default();
         let close = self.close_window(WinKind::AddUrl);
         self.offer_new_item(id, close)
+    }
+
+    fn apply_plugin_plan(&mut self, id: DlId, info: crate::plugins::PlanInfo) {
+        if let Some(d) = self.item_mut(id) {
+            if let Some(transfer) = &info.plan.transfer {
+                d.size = Some(
+                    transfer
+                        .files
+                        .iter()
+                        .filter(|file| {
+                            info.preferences
+                                .transfer_files
+                                .as_ref()
+                                .is_none_or(|files| files.contains(&file.index))
+                        })
+                        .map(|file| file.size)
+                        .sum(),
+                );
+                d.resume = Some(true);
+            }
+            d.plugin_plan = Some(info);
+        }
     }
 
     fn on_ext_event(&mut self, ev: crate::extbus::ExtEvent) -> Task<Message> {
@@ -4848,6 +4940,12 @@ impl App {
 
     fn on_engine(&mut self, ev: engine::Event) -> Task<Message> {
         match ev {
+            engine::Event::PluginDetails { id, rows } => {
+                if let Some(item) = self.item_mut(id) {
+                    item.plugin_details = rows;
+                }
+                Task::none()
+            }
             engine::Event::PluginPrompt(prompt) => {
                 if let Some(old) = self.options.plugins.prompt.take() {
                     let _ = old.reply.send(Err(hya_plugin_api::PluginError::new(
@@ -4883,7 +4981,12 @@ impl App {
                 file_name,
             } => {
                 if let Some(d) = self.item_mut(id) {
-                    d.resume = Some(ranges);
+                    d.resume = Some(
+                        ranges
+                            || d.plugin_plan
+                                .as_ref()
+                                .is_some_and(|info| info.plan.transfer.is_some()),
+                    );
                     // The state stays Connecting: the probe answered, but no
                     // byte has arrived — the first Progress event promotes to
                     // Receiving. (Jumping early made the Status column show
@@ -5424,10 +5527,12 @@ impl App {
                 }
             }
             Message::AnimTick => {
+                let fast = self.animation_interval_ms() == 33;
+                let glide = if fast { 0.163 } else { 0.35 };
                 // The indeterminate scan bar: one sweep every ~1.6 s, folded
                 // at 2.0 so the block returns instead of snapping back.
                 for st in self.scans.values_mut().filter(|s| s.running()) {
-                    st.phase = (st.phase + 0.05) % 2.0;
+                    st.phase = (st.phase + if fast { 0.020625 } else { 0.05 }) % 2.0;
                 }
                 for d in &mut self.state.downloads {
                     let target = d.progress();
@@ -5441,8 +5546,18 @@ impl App {
                         // Backwards (redownload) or a jump the glide would
                         // turn into a long crawl: snap.
                         d.disp_progress = target;
-                    } else if diff > 0.0005 {
-                        d.disp_progress += diff * 0.35;
+                    } else if diff
+                        > if d
+                            .plugin_plan
+                            .as_ref()
+                            .is_some_and(|info| info.plan.transfer.is_some())
+                        {
+                            0.000005
+                        } else {
+                            0.0005
+                        }
+                    {
+                        d.disp_progress += diff * glide;
                     } else {
                         d.disp_progress = target;
                     }
@@ -6010,6 +6125,10 @@ impl App {
                 Task::none()
             }
             Message::AddrChanged(s) => {
+                if let Some(ctl) = &self.add_url.plugin_ctl {
+                    ctl.cancel();
+                }
+                self.add_url.input_plugin = None;
                 self.add_url.address = s;
                 self.add_url.error = None;
                 // An edited address no longer describes the manifest we
@@ -6622,6 +6741,83 @@ impl App {
                 let review = crate::plugins::update(self, crate::plugins::Message::Review);
                 Task::batch([open, review])
             }
+            Message::PluginBrowse(id, index) => {
+                let action = self
+                    .options
+                    .plugins
+                    .installed
+                    .iter()
+                    .find(|plugin| plugin.enabled && plugin.manifest.id == id)
+                    .and_then(|plugin| plugin.manifest.input_actions.get(index))
+                    .cloned();
+                let Some(action) = action else {
+                    return Task::none();
+                };
+                picker::file(
+                    self.win_of(WinKind::AddUrl),
+                    Ask {
+                        title: Some(action.label.clone()),
+                        owned_filter: Some((action.label, action.extensions)),
+                        ..Default::default()
+                    },
+                )
+                .map(move |path| Message::PluginFilePicked(id.clone(), path))
+            }
+            Message::PluginFilePicked(id, path) => {
+                let Some(path) = path else {
+                    return Task::none();
+                };
+                if self.win_of(WinKind::AddUrl).is_none() {
+                    return Task::none();
+                }
+                match url::Url::from_file_path(path) {
+                    Ok(url) => {
+                        if let Some(ctl) = &self.add_url.plugin_ctl {
+                            ctl.cancel();
+                        }
+                        self.add_url = AddUrlState {
+                            address: url.into(),
+                            input_plugin: Some(id),
+                            plugin_ctl: self.add_url.plugin_ctl.clone(),
+                            plugin_probing: self.add_url.plugin_probing,
+                            ..Default::default()
+                        };
+                        self.update(Message::PluginProbe)
+                    }
+                    Err(()) => {
+                        self.add_url.error = Some("Cannot open this file path.".into());
+                        Task::none()
+                    }
+                }
+            }
+            Message::TransferFileSelected(index, selected) => {
+                if let Some(info) = &mut self.add_url.plugin_plan {
+                    if let Some(transfer) = &info.plan.transfer {
+                        if !transfer.files.iter().any(|file| file.index == index) {
+                            return Task::none();
+                        }
+                        let indices = info.preferences.transfer_files.get_or_insert_with(|| {
+                            transfer.files.iter().map(|file| file.index).collect()
+                        });
+                        indices.retain(|i| *i != index);
+                        if selected {
+                            indices.push(index);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::PluginProbeFinished(url, ctl, result) => {
+                if !self
+                    .add_url
+                    .plugin_ctl
+                    .as_ref()
+                    .is_some_and(|current| std::sync::Arc::ptr_eq(current, &ctl))
+                {
+                    return Task::none();
+                }
+                self.update(Message::PluginProbed(url, result))
+            }
             Message::PluginProbe => {
                 if self.add_url.plugin_probe_stale {
                     self.add_url.plugin_plan = None;
@@ -6641,9 +6837,15 @@ impl App {
                 let cookies = self.add_url.capture.cookies.clone();
                 let key = url.clone();
                 let browser_cookies = self.add_url.browser_cookies.clone();
+                let only = self.add_url.input_plugin.clone();
+                let ctl = hya_plugin::runtime::CallCtl::new(std::time::Duration::from_secs(150));
+                self.add_url.plugin_ctl = Some(ctl.clone());
+                let reply_ctl = ctl.clone();
                 Task::perform(
-                    crate::plugins::resolve(url, referer, cookies, browser_cookies),
-                    move |r| Message::PluginProbed(key.clone(), Box::new(r)),
+                    crate::plugins::resolve(url, referer, cookies, browser_cookies, only, ctl),
+                    move |r| {
+                        Message::PluginProbeFinished(key.clone(), reply_ctl.clone(), Box::new(r))
+                    },
                 )
             }
             Message::PluginProbed(url, result) => {
@@ -7448,6 +7650,11 @@ impl App {
                 };
                 let id = self.add_item(pending.url, pending.auth, None);
                 self.apply_capture_extras(id, pending.capture);
+                if let Some(info) = pending.plugin_plan {
+                    let name = crate::plugins::file_name(&info);
+                    self.name_new_item(id, name);
+                    self.apply_plugin_plan(id, info);
+                }
                 // `name_1.ext`, `name_2.ext`, ... until it collides with
                 // neither the disk nor another list entry. Locked, because
                 // this copy exists precisely so the file already on disk is
@@ -7503,6 +7710,11 @@ impl App {
                         let next = self.next_confirm();
                         return Task::batch([window::close(id), next]);
                     }
+                    Some(WinKind::AddUrl) => {
+                        if let Some(ctl) = &self.add_url.plugin_ctl {
+                            ctl.cancel();
+                        }
+                    }
                     Some(WinKind::Shortcuts) => self.normalize_shortcuts(),
                     Some(WinKind::Complete(dl)) => self.complete_dismissed(dl),
                     // The countdown is normally dismissed by its own Cancel
@@ -7550,6 +7762,13 @@ impl App {
     /// its own path — a redirector (`href.li/?<url>`) reads as `index.html`
     /// — so ask the network the question the transfer would have asked.
     fn file_info_prefetch(&mut self, id: DlId) -> Task<Message> {
+        if self.item(id).is_some_and(|item| {
+            item.plugin_plan
+                .as_ref()
+                .is_some_and(|info| info.plan.transfer.is_some())
+        }) {
+            return Task::none();
+        }
         if self.cfg.settings.bg_download && self.auto_start_type(id) {
             return self.start_download(id, false);
         }
@@ -9257,6 +9476,26 @@ mod tests {
     /// action nobody can reach, and two actions on one combo means the
     /// alphabetically later id silently never fires.
     #[test]
+    fn native_progress_glides_small_verified_steps_without_changing_bytes() {
+        let mut app = App::default();
+        let mut download = item(1, "/tmp", "native", None, DlState::Receiving);
+        download.plugin_plan = Some(crate::plugins::tests::transfer_plan());
+        download.size = Some(1_000_000);
+        download.downloaded = 100;
+        download.disp_progress = 0.0;
+        app.state.downloads.push(download);
+        app.windows
+            .insert(window::Id::unique(), WinKind::Progress(1));
+        assert_eq!(app.animation_interval_ms(), 33);
+        let _ = app.update(Message::AnimTick);
+        let item = app.item(1).unwrap();
+        assert_eq!(item.downloaded, 100);
+        assert!(item.disp_progress > 0.0 && item.disp_progress < item.progress());
+        app.item_mut(1).unwrap().state = DlState::Paused;
+        assert_eq!(app.animation_interval_ms(), 80);
+    }
+
+    #[test]
     fn default_shortcuts_are_unique_and_match_what_a_key_press_produces() {
         use iced::keyboard::{Key, Modifiers};
 
@@ -10214,6 +10453,7 @@ mod tests {
             eta_secs: None,
             recorded_secs: None,
             conns: vec![],
+            plugin_details: vec![],
             status_line: String::new(),
             shutdown_after: false,
             shutdown_action: PowerAction::default(),
@@ -12133,6 +12373,7 @@ mod tests {
 
     fn pending(url: &str) -> Box<PendingAdd> {
         Box::new(PendingAdd {
+            plugin_plan: None,
             url: url.into(),
             auth: None,
             capture: CaptureExtras::default(),
@@ -12531,7 +12772,7 @@ mod tests {
     fn add_url_window_shrinks_when_media_controls_are_removed() {
         let mut app = App::default();
         let plain = app.window_size(WinKind::AddUrl);
-        assert_eq!(plain, (760.0, 146.0));
+        assert_eq!(plain, (760.0, 156.0));
         app.add_url.plugin_probing = true;
         let probing = app.window_size(WinKind::AddUrl);
         assert!(probing.1 > plain.1);

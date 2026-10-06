@@ -1,6 +1,6 @@
 [package]
 name = "hya-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 readme = "README.md"
 publish = true
@@ -15,7 +15,6 @@ description = "Plugin contract for the hydra download manager: plan, manifest, f
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 
-[dev-dependencies]
 serde_json = "1"
 
 [lints]

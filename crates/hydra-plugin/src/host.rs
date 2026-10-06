@@ -50,6 +50,9 @@ pub struct HostState<C: Connector> {
     pub permissions: hya_plugin_api::Permissions,
     pub http: HttpPolicy,
     pub connector: C,
+    /// Only the file explicitly supplied to the current resolver call.
+    pub input_file: Option<PathBuf>,
+    pub native_modules: BTreeMap<String, crate::native::Module>,
     pub data_dir: Option<PathBuf>,
     pub settings: BTreeMap<String, Value>,
     pub secrets: BTreeMap<String, Value>,
@@ -80,6 +83,8 @@ impl<C: Connector> HostState<C> {
             http,
             connector,
             data_dir: None,
+            input_file: None,
+            native_modules: BTreeMap::new(),
             settings: BTreeMap::new(),
             secrets: BTreeMap::new(),
             storage: BTreeMap::new(),
@@ -138,6 +143,8 @@ impl<C: Connector> Dispatcher<C> {
             ),
             "program_install" => self.program_install(&mut state, request),
             "exec" => self.exec(&mut state, request),
+            "native_call" => self.native_call(&state, request),
+            "input_read" => self.input_read(&state),
             "data_read" => self.data_read(&mut state, request),
             "data_write" => self.data_write(&mut state, request),
             "prompt" => self.prompt(&mut state, request),
@@ -450,6 +457,98 @@ impl<C: Connector> Dispatcher<C> {
         }
         let bytes = std::fs::read(path)
             .map_err(|e| PluginError::new(ErrorCode::Internal, e.to_string()))?;
+        encode(&BytesReply {
+            data_b64: hya_net::base64::encode(&bytes),
+        })
+    }
+
+    fn native_call(&self, state: &HostState<C>, request: &[u8]) -> Result<Vec<u8>, PluginError> {
+        #[derive(Deserialize)]
+        struct Request {
+            engine: String,
+            method: String,
+            request: serde_json::Value,
+        }
+        let mut request: Request = decode(request)?;
+        if let Some(object) = request.request.as_object_mut() {
+            object.insert(
+                "proxy".into(),
+                state
+                    .http
+                    .proxy
+                    .as_ref()
+                    .map(crate::transfer::proxy_config)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        if request.method == "download" {
+            return Err(PluginError::new(
+                ErrorCode::PermissionDenied,
+                "transfers must be started by the frontend",
+            ));
+        }
+        let module = state.native_modules.get(&request.engine).ok_or_else(|| {
+            PluginError::new(
+                ErrorCode::PermissionDenied,
+                "native module unavailable or permission not granted",
+            )
+        })?;
+        let mut reply = Vec::new();
+        let mut engine_error = None;
+        let result = module.call(
+            &request.method,
+            &serde_json::to_vec(&request.request)
+                .map_err(|e| PluginError::new(ErrorCode::InvalidInput, e.to_string()))?,
+            |bytes| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+                if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+                    engine_error = Some(error.to_owned());
+                    return Err(error.into());
+                }
+                reply = bytes.to_vec();
+                Ok(())
+            },
+            || self.ctl.check().is_err(),
+        );
+        self.ctl.check()?;
+        if let Some(error) = engine_error {
+            return Err(PluginError::new(ErrorCode::InvalidInput, error));
+        }
+        result?;
+        Ok(reply)
+    }
+
+    fn input_read(&self, state: &HostState<C>) -> Result<Vec<u8>, PluginError> {
+        use std::io::Read;
+        let path = state.input_file.as_ref().ok_or_else(|| {
+            PluginError::new(
+                ErrorCode::PermissionDenied,
+                "no file was supplied to this resolver",
+            )
+        })?;
+        let file = std::fs::File::open(path)
+            .map_err(|e| PluginError::new(ErrorCode::InvalidInput, e.to_string()))?;
+        if !file
+            .metadata()
+            .map_err(|e| PluginError::new(ErrorCode::InvalidInput, e.to_string()))?
+            .is_file()
+        {
+            return Err(PluginError::new(
+                ErrorCode::InvalidInput,
+                "input must be a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take((hya_plugin_api::limits::MAX_HTTP_BODY + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| PluginError::new(ErrorCode::InvalidInput, e.to_string()))?;
+        if bytes.len() > hya_plugin_api::limits::MAX_HTTP_BODY {
+            return Err(PluginError::new(
+                ErrorCode::InvalidInput,
+                "input file exceeds the read limit",
+            ));
+        }
         encode(&BytesReply {
             data_b64: hya_net::base64::encode(&bytes),
         })
@@ -920,6 +1019,70 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::PermissionDenied
+        );
+    }
+    #[test]
+    fn input_read_is_scoped_to_the_file_supplied_by_the_frontend() {
+        let mut dispatcher = dispatcher();
+        assert_eq!(
+            dispatcher.call("input_read", b"{}").unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("input.x");
+        std::fs::write(&path, b"selected-file").unwrap();
+        dispatcher.state().lock().unwrap().input_file = Some(path);
+        let reply: serde_json::Value = serde_json::from_slice(
+            &dispatcher
+                .call("input_read", br#"{"path":"/not/selected"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reply["data_b64"], hya_net::base64::encode(b"selected-file"));
+        dispatcher.state().lock().unwrap().input_file = Some(directory.path().to_owned());
+        assert_eq!(
+            dispatcher.call("input_read", b"{}").unwrap_err().code,
+            ErrorCode::InvalidInput
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_calls_require_a_grant_and_cannot_start_frontend_transfers() {
+        let mut dispatcher = dispatcher();
+        let request = br#"{"engine":"test","method":"inspect","request":{"value":42}}"#;
+        assert_eq!(
+            dispatcher.call("native_call", request).unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+        dispatcher
+            .state()
+            .lock()
+            .unwrap()
+            .native_modules
+            .insert("test".into(), crate::native::tests::fixture());
+        let reply: serde_json::Value =
+            serde_json::from_slice(&dispatcher.call("native_call", request).unwrap()).unwrap();
+        assert_eq!(reply["value"], 42);
+        assert_eq!(
+            dispatcher
+                .call(
+                    "native_call",
+                    br#"{"engine":"test","method":"download","request":{}}"#
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        assert_eq!(
+            dispatcher
+                .call(
+                    "native_call",
+                    br#"{"engine":"test","method":"inspect","request":{"error_reply":true}}"#
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidInput
         );
     }
 }

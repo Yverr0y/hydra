@@ -114,6 +114,33 @@ impl Host {
         #[cfg(target_arch = "wasm32")]
         decode(&reply)
     }
+    /// Calls an explicitly granted native module linked to the plugin's library dependencies.
+    /// # Errors
+    /// Returns an error when permission is missing, the module changed or its call failed.
+    pub fn native_call<T: DeserializeOwned>(
+        &self,
+        engine: &str,
+        method: &str,
+        request: &impl Serialize,
+    ) -> Result<T> {
+        self.call(
+            "native_call",
+            &serde_json::json!({"engine":engine,"method":method,"request":request}),
+        )
+    }
+
+    /// Reads the file explicitly selected for this resolver call, as base64.
+    /// # Errors
+    /// Returns an error when no file was supplied, it cannot be read or exceeds the host limit.
+    pub fn input_read(&self) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Reply {
+            data_b64: String,
+        }
+        let reply: Reply = self.call("input_read", &serde_json::json!({}))?;
+        Ok(reply.data_b64)
+    }
+
     /// Runs an approved executable template.
     pub fn exec(&self, program: &str, args: &[String]) -> Result<ExecOutput> {
         self.call("exec", &serde_json::json!({"program":program,"args":args}))
@@ -306,6 +333,10 @@ mod tests {
     #[test]
     fn native_host_calls_return_explicit_wasm_requirement() {
         assert_eq!(Host.settings().unwrap_err().code, ErrorCode::Unsupported);
+        assert_eq!(Host.input_read().unwrap_err().code, ErrorCode::Unsupported);
+        let native: Result<serde_json::Value> =
+            Host.native_call("engine", "inspect", &serde_json::json!({}));
+        assert_eq!(native.unwrap_err().code, ErrorCode::Unsupported);
         assert_eq!(
             Host.exec("tool", &[]).unwrap_err().code,
             ErrorCode::Unsupported

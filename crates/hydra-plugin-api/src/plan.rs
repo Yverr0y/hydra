@@ -123,6 +123,44 @@ pub struct PlaylistEntry {
     pub title: Option<String>,
 }
 
+/// One output described by a native transfer engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferFile {
+    pub index: u32,
+    pub path: String,
+    pub size: u64,
+}
+
+/// Whether a native transfer publishes one file or a directory of files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferOutput {
+    File,
+    #[default]
+    Directory,
+}
+
+/// Plugin-provided headings for a transfer's live detail table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferDetails {
+    pub title: String,
+    pub columns: Vec<String>,
+}
+
+/// Opaque engine parameters and output descriptions for a native transfer engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transfer {
+    #[serde(default)]
+    pub details: Option<TransferDetails>,
+    pub engine: String,
+    #[serde(default)]
+    pub output: TransferOutput,
+    pub metadata: serde_json::Value,
+    pub files: Vec<TransferFile>,
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
     pub id: String,
@@ -133,6 +171,8 @@ pub struct Plan {
     #[serde(default)]
     pub assemble: Assemble,
     pub tracks: Vec<Track>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<Box<Transfer>>,
     /// An ordered collection of page URLs, mutually exclusive with media tracks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<PlaylistEntry>,
@@ -147,6 +187,7 @@ impl Plan {
             expires_at: None,
             assemble: Assemble::None,
             tracks: vec![track],
+            transfer: None,
             entries: Vec::new(),
         }
     }

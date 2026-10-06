@@ -115,6 +115,7 @@ pub struct UrlPattern {
     scheme: SchemeMatch,
     host: HostPattern,
     path: String,
+    scheme_only: bool,
 }
 
 impl UrlPattern {
@@ -123,6 +124,17 @@ impl UrlPattern {
     /// # Errors
     /// Returns why the pattern is malformed.
     pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some(scheme) = s.strip_suffix(":*") {
+            if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_lowercase()) {
+                return Err("invalid scheme claim".into());
+            }
+            return Ok(Self {
+                scheme: SchemeMatch::Literal(scheme.into()),
+                host: HostPattern::parse("*")?,
+                path: String::new(),
+                scheme_only: true,
+            });
+        }
         let (scheme, rest) = s
             .split_once("://")
             .ok_or_else(|| format!("pattern `{s}` has no scheme"))?;
@@ -139,6 +151,7 @@ impl UrlPattern {
             scheme,
             host: HostPattern::parse(host)?,
             path: path.to_string(),
+            scheme_only: false,
         })
     }
 
@@ -151,6 +164,9 @@ impl UrlPattern {
             SchemeMatch::HttpOrHttps => matches!(url.scheme(), "http" | "https"),
             SchemeMatch::Literal(l) => url.scheme() == l,
         };
+        if self.scheme_only {
+            return scheme_ok;
+        }
         if !scheme_ok || !self.host.matches_url(&url) {
             return false;
         }
@@ -161,6 +177,32 @@ impl UrlPattern {
         }
         glob(&self.path, &target)
     }
+}
+
+/// Matches file inputs through their declared picker filters and URLs through claims.
+pub fn claims_input(manifest: &hya_plugin_api::Manifest, address: &str) -> bool {
+    if let Ok(url) = Url::parse(address) {
+        if url.scheme() == "file" {
+            let Ok(path) = url.to_file_path() else {
+                return false;
+            };
+            return path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|extension| {
+                    manifest.input_actions.iter().any(|action| {
+                        action
+                            .extensions
+                            .iter()
+                            .any(|ext| ext.eq_ignore_ascii_case(extension))
+                    })
+                });
+        }
+    }
+    manifest
+        .claims
+        .iter()
+        .any(|pattern| UrlPattern::parse(pattern).is_ok_and(|pattern| pattern.matches(address)))
 }
 
 fn glob(pattern: &str, text: &str) -> bool {
@@ -236,6 +278,26 @@ mod tests {
 
     fn claim(pattern: &str, url: &str) -> bool {
         UrlPattern::parse(pattern).unwrap().matches(url)
+    }
+
+    #[test]
+    fn torrent_claims_match_metadata_paths_and_queries_without_executable_suffixes() {
+        for address in [
+            "https://example.com/linux.torrent",
+            "https://example.com/linux.torrent?token=x",
+        ] {
+            assert!(["*://*/*.torrent", "*://*/*.torrent?*"]
+                .iter()
+                .any(|pattern| claim(pattern, address)));
+        }
+        for address in [
+            "https://example.com/linux.torrent.exe",
+            "https://example.com/linux.torrent.exe?token=x",
+        ] {
+            assert!(!["*://*/*.torrent", "*://*/*.torrent?*"]
+                .iter()
+                .any(|pattern| claim(pattern, address)));
+        }
     }
 
     #[test]
@@ -376,5 +438,22 @@ mod tests {
         let pinned = HostList::parse(&["example.com:8443".into()]).unwrap();
         assert!(!pinned.allows_host("example.com", Some(8080)));
         assert!(pinned.allows_host("example.com", Some(8443)));
+    }
+    #[test]
+    fn scheme_claims_accept_magnets_without_a_host() {
+        assert!(claim(
+            "magnet:*",
+            "magnet:?xt=urn:btih:0123456789012345678901234567890123456789"
+        ));
+        assert!(!claim("magnet:*", "https://example.com/file"));
+        assert!(UrlPattern::parse(":*").is_err());
+    }
+
+    #[test]
+    fn explicit_file_actions_route_only_their_declared_extensions() {
+        let manifest: hya_plugin_api::Manifest = toml::from_str("id='example.x'\nname='X'\nversion='1.0.0'\napi=1\nmodule='plugin.wasm'\n[[input_actions]]\nlabel='Browse X File'\nextensions=['x']").unwrap();
+        assert!(claims_input(&manifest, "file:///tmp/test.X"));
+        assert!(!claims_input(&manifest, "file:///tmp/test.x.exe"));
+        assert!(!claims_input(&manifest, "file:///tmp/test.torrent"));
     }
 }

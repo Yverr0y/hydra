@@ -1226,7 +1226,7 @@ pub fn default_job() -> Job {
 /// bytes to a piped archive. stdout belongs to the object, on the same
 /// principle `--json` follows: a machine channel carries one thing, or it
 /// carries nothing usable.
-fn progress_for(job: &Job, name: &str, size: Option<u64>) -> Result<Progress, String> {
+pub(crate) fn progress_for(job: &Job, name: &str, size: Option<u64>) -> Result<Progress, String> {
     let mut p = Progress::new(name, size, job.verbose, job.no_progress, job.quiet);
     if let Some((path, append)) = &job.logfile {
         if let Err(e) = p.set_logfile(path, *append) {

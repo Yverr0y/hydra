@@ -370,6 +370,7 @@ fn download(i: u64) -> DownloadItem {
         eta_secs: (state == DlState::Receiving).then_some(125),
         recorded_secs: None,
         conns: vec![],
+        plugin_details: vec![],
         status_line: String::new(),
         shutdown_after: false,
         shutdown_action: Default::default(),
@@ -580,6 +581,7 @@ fn plugin_list_settings_and_info_render() {
             settings: Default::default(),
             failures: 0,
             module_sha256: String::new(),
+            native_sha256: Default::default(),
             previous: None,
         });
     app.options.plugins.indexes = vec![
@@ -705,6 +707,52 @@ fn add_url_optional_status_rows_render_without_empty_panels() {
         h.step(name, &[]);
         h.assert_clean(name);
     }
+}
+
+#[test]
+fn plugin_file_actions_and_native_file_selection_render_in_add_url() {
+    let mut app = app_with(0);
+    app.options.plugins.installed = vec![crate::plugins::tests::file_plugin(
+        "example.x",
+        "Browse X File",
+        "x",
+    )];
+    app.add_url.address = "file:///tmp/input.x".into();
+    app.add_url.plugin_plan = Some(crate::plugins::tests::transfer_plan());
+    let mut harness = Harness::new(app, WinKind::AddUrl, Size::new(760.0, 360.0), 1.0, true);
+    harness.step("native-file-input", &[]);
+    harness.assert_clean("native-file-input");
+}
+
+#[test]
+fn plugin_connections_render_the_plugins_columns_and_rows() {
+    let mut app = app_with(1);
+    let id = app.state.downloads[0].id;
+    let mut info = crate::plugins::tests::transfer_plan();
+    info.plan.transfer.as_mut().unwrap().details = Some(hya_plugin_api::TransferDetails {
+        title: "Peer connections".into(),
+        columns: vec!["Peer".into(), "Downloaded".into(), "Client".into()],
+    });
+    app.state.downloads[0].plugin_plan = Some(info);
+    let _ = app.update(crate::app::Message::Engine(
+        crate::engine::Event::PluginDetails {
+            id,
+            rows: vec![vec![
+                "127.0.0.1:6881".into(),
+                "16 KB".into(),
+                "Test peer".into(),
+            ]],
+        },
+    ));
+    let mut harness = Harness::new(
+        app,
+        WinKind::Progress(id),
+        Size::new(680.0, 616.0),
+        1.0,
+        true,
+    );
+    harness.step("plugin-peer-details", &[]);
+    harness.assert_clean("plugin-peer-details");
 }
 
 #[test]

@@ -177,24 +177,25 @@ pub fn dlg_btn_auto_primary<'a>(label: String, msg: Option<Message>) -> El<'a> {
 /// A classic dialog push button: the uniform dialog width, and wider only
 /// where the label needs it.
 pub fn dlg_btn<'a>(label: String, msg: Option<Message>) -> El<'a> {
-    let w = btn_width(&label);
-    let mut b = button(centered(label, theme::FONT_SIZE))
-        .padding([5.0, BTN_PAD_X])
-        .width(w)
-        .style(theme::btn);
-    if let Some(m) = msg {
-        b = b.on_press(m);
-    }
-    b.into()
+    let width = btn_width(&label);
+    dlg_btn_sized(label, msg, width, false)
 }
 
 /// The dialog's default button (accent border).
 pub fn dlg_btn_primary<'a>(label: String, msg: Option<Message>) -> El<'a> {
-    let w = btn_width(&label);
+    let width = btn_width(&label);
+    dlg_btn_sized(label, msg, width, true)
+}
+
+fn dlg_btn_sized<'a>(label: String, msg: Option<Message>, width: f32, primary: bool) -> El<'a> {
     let mut b = button(centered(label, theme::FONT_SIZE))
         .padding([5.0, BTN_PAD_X])
-        .width(w)
-        .style(theme::btn_primary);
+        .width(width)
+        .style(if primary {
+            theme::btn_primary
+        } else {
+            theme::btn
+        });
     if let Some(m) = msg {
         b = b.on_press(m);
     }

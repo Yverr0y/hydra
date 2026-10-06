@@ -134,6 +134,17 @@ pub fn check_track_transport(
 /// # Errors
 /// `invalid_plan` for the first violated rule.
 pub fn accept(plan: &mut Plan, allowed: &HostList, clamps: Clamps) -> Result<(), PluginError> {
+    if let Some(transfer) = &plan.transfer {
+        crate::transfer::validate(transfer)?;
+        if !plan.tracks.is_empty()
+            || !plan.entries.is_empty()
+            || plan.assemble != hya_plugin_api::Assemble::None
+        {
+            return Err(invalid(
+                "transfer plans cannot contain tracks, playlists or assembly",
+            ));
+        }
+    }
     if plan.id.is_empty() || plan.id.len() > MAX_STRING_FIELD {
         return Err(invalid("plan id is empty or too long"));
     }
@@ -167,6 +178,9 @@ pub fn accept(plan: &mut Plan, allowed: &HostList, clamps: Clamps) -> Result<(),
                 return Err(invalid("playlist entries must use HTTP or HTTPS"));
             }
         }
+        return Ok(());
+    }
+    if plan.transfer.is_some() {
         return Ok(());
     }
     if plan.tracks.is_empty() {

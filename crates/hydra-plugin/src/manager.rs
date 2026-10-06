@@ -24,6 +24,8 @@ pub struct ResolveContext {
     pub ctl: std::sync::Arc<CallCtl>,
     pub cookies: hya_net::CookieJar,
     pub only: Option<String>,
+    /// Explicit file input selected by the frontend, scoped to this call.
+    pub input_file: Option<PathBuf>,
     /// User-selected proxy, never supplied by a plugin.
     pub proxy: Option<hya_net::Proxy>,
 }
@@ -33,6 +35,7 @@ impl Default for ResolveContext {
             ctl: CallCtl::new(Duration::from_secs(300)),
             cookies: hya_net::CookieJar::new(),
             only: None,
+            input_file: None,
             proxy: None,
         }
     }
@@ -56,6 +59,8 @@ pub struct Installed {
     pub failures: u32,
     #[serde(default)]
     pub module_sha256: String,
+    #[serde(default)]
+    pub native_sha256: BTreeMap<String, String>,
     #[serde(default)]
     pub previous: Option<Box<Installed>>,
 }
@@ -234,6 +239,22 @@ impl Manager {
                 "install requires consent to the displayed permissions",
             ));
         }
+        for id in &grants.native {
+            if !package
+                .manifest
+                .native_modules
+                .iter()
+                .any(|module| module.id == *id && module.platform == crate::native::platform())
+            {
+                return Err(PluginError::new(
+                    ErrorCode::Unsupported,
+                    format!(
+                        "native module {id} is not available for {}",
+                        crate::native::platform()
+                    ),
+                ));
+            }
+        }
         for pattern in &package.manifest.claims {
             UrlPattern::parse(pattern).map_err(error)?;
         }
@@ -313,6 +334,17 @@ impl Manager {
             p.previous = None;
             Box::new(p)
         });
+        let native_sha256 = package
+            .manifest
+            .native_modules
+            .iter()
+            .map(|module| {
+                (
+                    module.module.clone(),
+                    package::sha256_hex(&package.entries[&module.module]),
+                )
+            })
+            .collect();
         self.state.plugins.insert(
             position,
             Installed {
@@ -326,6 +358,7 @@ impl Manager {
                 settings,
                 failures: 0,
                 module_sha256: package::sha256_hex(&package.module),
+                native_sha256,
                 previous,
             },
         );
@@ -388,6 +421,13 @@ impl Manager {
             }
             "exec_from_data" => {if grant && !p.manifest.permissions.exec_from_data {return Err(PluginError::new(ErrorCode::PermissionDenied,"exec_from_data is not declared"));}p.grants.exec_from_data=grant;}
             "data" => { if grant && !p.manifest.permissions.data { return Err(PluginError::new(ErrorCode::PermissionDenied,"data is not declared")); } p.grants.data = grant; }
+            "native" => {
+                if !p.manifest.permissions.native.iter().any(|id| id == value) {
+                    return Err(PluginError::new(ErrorCode::PermissionDenied, "native module is not declared"));
+                }
+                p.grants.native.retain(|id| id != value);
+                if grant { p.grants.native.push(value.into()); }
+            }
             "exec" => {
                 let entries: Vec<_> = p.manifest.permissions.exec.iter().filter(|e| e.program == value).cloned().collect();
                 if entries.is_empty() { return Err(PluginError::new(ErrorCode::PermissionDenied,"program is not declared")); }
@@ -406,13 +446,9 @@ impl Manager {
     }
     /// Returns whether an enabled resolver claims an address.
     pub fn claims(&self, url: &str) -> bool {
-        self.list().iter().any(|p| {
-            p.enabled
-                && p.manifest
-                    .claims
-                    .iter()
-                    .any(|s| UrlPattern::parse(s).is_ok_and(|m| m.matches(url)))
-        })
+        self.list()
+            .iter()
+            .any(|p| p.enabled && crate::matcher::claims_input(&p.manifest, url))
     }
     /// Sets the complete resolver order, rejecting missing or duplicate IDs.
     pub fn order(&mut self, ids: &[String]) -> Result<(), PluginError> {
@@ -489,6 +525,28 @@ impl Manager {
         state.http.cookies = HostList::parse(&p.grants.cookies).map_err(error)?;
         state.http.user_cookies = context.cookies.clone();
         state.http.proxy = context.proxy.clone();
+        state.input_file = context.input_file.clone();
+        state.native_modules = package
+            .manifest
+            .native_modules
+            .iter()
+            .filter(|module| {
+                module.platform == crate::native::platform() && p.grants.native.contains(&module.id)
+            })
+            .map(|module| {
+                (
+                    module.id.clone(),
+                    crate::native::Module {
+                        path: p.directory.join(&module.module),
+                        sha256: p
+                            .native_sha256
+                            .get(&module.module)
+                            .cloned()
+                            .unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
         if p.grants.data {
             state.data_dir = Some(self.root.join(&p.manifest.id).join("data"));
         }
@@ -899,11 +957,7 @@ impl Manager {
             let p = self.state.plugins[i].clone();
             if !p.enabled
                 || context.only.as_ref().is_some_and(|id| id != &p.manifest.id)
-                || !p
-                    .manifest
-                    .claims
-                    .iter()
-                    .any(|s| UrlPattern::parse(s).is_ok_and(|m| m.matches(&request.url)))
+                || !crate::matcher::claims_input(&p.manifest, &request.url)
             {
                 continue;
             }
@@ -1490,5 +1544,55 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("state.toml"), "[broken").unwrap();
         assert!(Manager::open(root.path().to_path_buf()).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn native_installation_pins_code_and_revoking_permission_blocks_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        fixture(directory.path(), r#""not_claimed""#);
+        let path = directory.path().join(package::MANIFEST_NAME);
+        let mut manifest = std::fs::read_to_string(&path).unwrap();
+        manifest = manifest.replace("[permissions]", "[permissions]\nnative=['test-engine']");
+        manifest += &format!(
+            "\n[[native_modules]]\nid='test-engine'\nplatform='{}'\nmodule='test.so'\n",
+            crate::native::platform()
+        );
+        std::fs::write(&path, manifest).unwrap();
+        std::fs::copy(
+            crate::native::tests::fixture().path,
+            directory.path().join("test.so"),
+        )
+        .unwrap();
+        let grants = package::load_dir(directory.path())
+            .unwrap()
+            .manifest
+            .permissions;
+        let mut manager = Manager::open(root.path().to_owned()).unwrap();
+        let id = manager.install(directory.path(), grants).unwrap();
+        assert_eq!(manager.list()[0].native_sha256.len(), 1);
+        drop(manager);
+        let module =
+            crate::transfer::authorize(root.path().to_owned(), &id, "test-engine").unwrap();
+        module.call("inspect", b"{}", |_| Ok(()), || false).unwrap();
+        std::fs::write(directory.path().join("test.so"), b"changed").unwrap();
+        assert_eq!(
+            module
+                .call("inspect", b"{}", |_| Ok(()), || false)
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
+        let mut manager = Manager::open(root.path().to_owned()).unwrap();
+        manager
+            .permission(&id, "native:test-engine", false)
+            .unwrap();
+        drop(manager);
+        assert_eq!(
+            crate::transfer::authorize(root.path().to_owned(), &id, "test-engine")
+                .unwrap_err()
+                .code,
+            ErrorCode::PermissionDenied
+        );
     }
 }

@@ -29,7 +29,25 @@ pub struct Permissions {
     #[serde(default)]
     pub exec: Vec<ExecEntry>,
     #[serde(default)]
+    pub native: Vec<String>,
+    #[serde(default)]
     pub exec_from_data: bool,
+}
+
+/// A packaged native library for a specific operating system and architecture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeModule {
+    pub id: String,
+    /// For example `macos-aarch64`, `linux-x86_64` or `windows-x86_64`.
+    pub platform: String,
+    pub module: String,
+}
+
+/// A file picker offered by an enabled resolver in the Add URL dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputAction {
+    pub label: String,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +78,10 @@ pub struct Manifest {
     #[serde(default)]
     pub claims: Vec<String>,
     #[serde(default)]
+    pub input_actions: Vec<InputAction>,
+    #[serde(default)]
+    pub native_modules: Vec<NativeModule>,
+    #[serde(default)]
     pub permissions: Permissions,
     #[serde(default)]
     pub settings: Vec<Field>,
@@ -72,6 +94,61 @@ impl Manifest {
     /// Returns the first violated rule.
     pub fn validate(&self) -> Result<(), String> {
         valid_id(&self.id)?;
+        let mut modules = std::collections::HashSet::new();
+        if self.native_modules.len() > 8 {
+            return Err("too many native modules".into());
+        }
+        for module in &self.native_modules {
+            if module.id.is_empty()
+                || module.id.len() > 80
+                || !module
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                || module.platform.is_empty()
+                || !module
+                    .platform
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                || module.module.is_empty()
+                || module.module.contains(['/', '\\', '\0'])
+                || !matches!(
+                    std::path::Path::new(&module.module)
+                        .extension()
+                        .and_then(|s| s.to_str()),
+                    Some("so" | "dylib" | "dll")
+                )
+                || !modules.insert((&module.id, &module.platform))
+            {
+                return Err("invalid or duplicate native module".into());
+            }
+        }
+        if self
+            .permissions
+            .native
+            .iter()
+            .any(|id| !self.native_modules.iter().any(|module| &module.id == id))
+        {
+            return Err("native permission names an undeclared module".into());
+        }
+        if self.input_actions.len() > 8 {
+            return Err("too many input actions".into());
+        }
+        for action in &self.input_actions {
+            if action.label.trim().is_empty()
+                || action.label.len() > 80
+                || action.label.chars().any(char::is_control)
+                || action.extensions.is_empty()
+                || action.extensions.len() > 16
+                || action.extensions.iter().any(|ext| {
+                    ext.is_empty()
+                        || ext.len() > 16
+                        || !ext.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+            {
+                return Err("invalid input action".into());
+            }
+        }
         if self
             .author
             .as_ref()
@@ -224,6 +301,8 @@ mod tests {
             publisher_key: None,
             hooks: vec![],
             claims: vec![],
+            input_actions: vec![],
+            native_modules: vec![],
             permissions: Permissions::default(),
             settings: vec![],
         }
@@ -310,5 +389,41 @@ mod tests {
         assert_eq!(m.author, None);
         assert_eq!(m.memory_mb, DEFAULT_MEMORY_MB);
         assert!(!m.permissions.data);
+    }
+    #[test]
+    fn file_actions_are_optional_and_have_bounded_labels_and_filters() {
+        let mut manifest = base();
+        manifest.input_actions = vec![InputAction {
+            label: "Browse X File".into(),
+            extensions: vec!["x".into()],
+        }];
+        manifest.validate().unwrap();
+        for extension in ["", "../x", "x.y", "*"] {
+            manifest.input_actions[0].extensions = vec![extension.into()];
+            assert!(manifest.validate().is_err());
+        }
+        manifest.input_actions[0].extensions = vec!["x".into()];
+        manifest.input_actions[0].label = " ".into();
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn native_modules_require_safe_names_unique_platforms_and_declared_grants() {
+        let mut manifest = base();
+        let module = NativeModule {
+            id: "x-engine".into(),
+            platform: "linux-x86_64".into(),
+            module: "x.so".into(),
+        };
+        manifest.native_modules.push(module.clone());
+        manifest.permissions.native.push("x-engine".into());
+        manifest.validate().unwrap();
+        manifest.native_modules.push(module);
+        assert!(manifest.validate().is_err());
+        manifest.native_modules.pop();
+        manifest.native_modules[0].module = "../x.so".into();
+        assert!(manifest.validate().is_err());
+        manifest.native_modules.clear();
+        assert!(manifest.validate().is_err());
     }
 }

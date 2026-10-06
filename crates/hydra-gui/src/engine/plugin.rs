@@ -10,6 +10,102 @@ use std::sync::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+#[derive(Default)]
+struct NativeRates {
+    cap: u64,
+    active: usize,
+    transfers:
+        std::collections::BTreeMap<crate::model::DlId, (u64, Arc<std::sync::atomic::AtomicU64>)>,
+}
+
+fn rates() -> &'static Mutex<NativeRates> {
+    static RATES: std::sync::OnceLock<Mutex<NativeRates>> = std::sync::OnceLock::new();
+    RATES.get_or_init(|| Mutex::new(NativeRates::default()))
+}
+
+fn distribute_rates(state: &NativeRates) {
+    super::global_limiter().set_rate(distribute_native_rates(state));
+}
+
+fn distribute_native_rates(state: &NativeRates) -> u64 {
+    let count = state.transfers.len();
+    let http_active = state.active > count;
+    let lanes = count + usize::from(http_active);
+    let reserved = if http_active && state.cap > 0 {
+        (state.cap / lanes.max(1) as u64).max(1)
+    } else {
+        0
+    };
+    let native_budget = state.cap.saturating_sub(reserved);
+    let mut allocated = 0;
+    for (ordinal, (requested, control)) in state.transfers.values().enumerate() {
+        let share = if count == 0 {
+            0
+        } else {
+            native_budget / count as u64
+                + u64::from((ordinal as u64) < native_budget % count as u64)
+        };
+        let cap = if state.cap == 0 {
+            *requested
+        } else if share == 0 {
+            u64::MAX - 1
+        } else if *requested == 0 {
+            share
+        } else {
+            share.min(*requested)
+        };
+        if cap != u64::MAX - 1 {
+            allocated += cap;
+        }
+        control.store(cap, Ordering::Relaxed);
+    }
+    if state.cap == 0 {
+        0
+    } else {
+        state.cap.saturating_sub(allocated).max(1)
+    }
+}
+
+pub(super) fn set_global_limit(cap: u64) {
+    let mut state = rates().lock().unwrap_or_else(|error| error.into_inner());
+    state.cap = cap;
+    distribute_rates(&state);
+}
+
+pub(super) fn set_active_count(count: usize) {
+    let mut state = rates().lock().unwrap_or_else(|error| error.into_inner());
+    if state.active != count {
+        state.active = count;
+        distribute_rates(&state);
+    }
+}
+
+pub(super) fn set_native_limit(id: crate::model::DlId, cap: u64) {
+    let mut state = rates().lock().unwrap_or_else(|error| error.into_inner());
+    if let Some((requested, _)) = state.transfers.get_mut(&id) {
+        *requested = cap;
+        distribute_rates(&state);
+    }
+}
+
+struct NativeRateGuard(crate::model::DlId);
+impl NativeRateGuard {
+    fn register(id: crate::model::DlId, cap: u64) -> (Self, Arc<std::sync::atomic::AtomicU64>) {
+        let control = Arc::new(std::sync::atomic::AtomicU64::new(cap));
+        let mut state = rates().lock().unwrap_or_else(|error| error.into_inner());
+        state.transfers.insert(id, (cap, control.clone()));
+        distribute_rates(&state);
+        (Self(id), control)
+    }
+}
+impl Drop for NativeRateGuard {
+    fn drop(&mut self) {
+        let mut state = rates().lock().unwrap_or_else(|error| error.into_inner());
+        state.transfers.remove(&self.0);
+        distribute_rates(&state);
+    }
+}
+
 pub(super) async fn run(
     spec: &StartSpec,
     cancel: &Arc<AtomicBool>,
@@ -36,6 +132,22 @@ async fn run_with_root(
     tx: &UnboundedSender<Event>,
     root: std::path::PathBuf,
 ) -> bool {
+    if let Some(info) = &spec.plugin_plan {
+        if let Some(transfer) = &info.plan.transfer {
+            run_transfer(
+                spec,
+                &info.plugin,
+                (**transfer).clone(),
+                info.preferences.transfer_files.clone(),
+                cancel,
+                final_path,
+                tx,
+                root,
+            )
+            .await;
+            return true;
+        }
+    }
     let request = ResolveRequest {
         url: spec.url.clone(),
         headers: spec
@@ -58,6 +170,9 @@ async fn run_with_root(
         }
     };
     let mut context = hya_plugin::manager::ResolveContext {
+        input_file: url::Url::parse(&spec.url)
+            .ok()
+            .and_then(|url| url.to_file_path().ok()),
         proxy: route.plugin_proxy(),
         ..Default::default()
     };
@@ -124,6 +239,20 @@ async fn run_with_root(
             container: Some("mkv".into()),
             ..Default::default()
         });
+    if let Some(transfer) = plan.transfer.take() {
+        run_transfer(
+            spec,
+            &plugin,
+            *transfer,
+            prefs.transfer_files,
+            cancel,
+            final_path,
+            tx,
+            crate::model::app_dir().join("plugins"),
+        )
+        .await;
+        return true;
+    }
     let selected = hya_plugin_api::select(&plan, &prefs);
     if selected.tracks.is_empty() {
         fail(format!("plugin {plugin}: no tracks selected"));
@@ -465,6 +594,118 @@ async fn run_with_root(
     true
 }
 
+async fn run_transfer(
+    spec: &StartSpec,
+    plugin: &str,
+    transfer: hya_plugin_api::Transfer,
+    files: Option<Vec<u32>>,
+    cancel: &Arc<AtomicBool>,
+    final_path: &Arc<Mutex<String>>,
+    tx: &UnboundedSender<Event>,
+    root: std::path::PathBuf,
+) {
+    let started = std::time::Instant::now();
+    let (_rate_guard, control) = NativeRateGuard::register(spec.id, spec.limit.unwrap_or(0));
+    let authorization_plugin = plugin.to_owned();
+    let program = transfer.engine.clone();
+    let mut done = 0;
+    let mut probed = false;
+    let result = async {
+        let proxy = crate::proxy::for_choice(&spec.proxy)?
+            .plugin_proxy()
+            .as_ref()
+            .map(hya_plugin::transfer::proxy_config);
+        let executable = tokio::task::spawn_blocking(move || {
+            hya_plugin::transfer::authorize(root, &authorization_plugin, &program)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+        let destination = final_path.lock().map_err(|e| e.to_string())?.clone().into();
+        let request = hya_plugin::transfer::Request {
+            transfer,
+            control: Some(control),
+            destination,
+            files,
+            download_limit: spec.limit.unwrap_or(0),
+            resume_path: format!("{}.transfer-resume", spec.temp_path).into(),
+            proxy,
+        };
+        hya_plugin::transfer::download(&executable, request, cancel.clone(), |progress| {
+            for record in &progress.logs {
+                hya_plugin::host::Frontend::log(
+                    &mut crate::plugins::Frontend {
+                        plugin: plugin.into(),
+                    },
+                    &record.level,
+                    &record.message,
+                );
+            }
+            let _ = tx.send(Event::PluginDetails {
+                id: spec.id,
+                rows: progress.details.clone(),
+            });
+            done = progress.done;
+            if !probed {
+                let _ = tx.send(Event::Probed {
+                    id: spec.id,
+                    size: Some(progress.total),
+                    ranges: false,
+                    file_name: None,
+                });
+                probed = true;
+            }
+            let _ = tx.send(Event::Status {
+                id: spec.id,
+                line: format!(
+                    "{} · {} peers · upload {}/s",
+                    progress.state,
+                    progress.peers,
+                    crate::fmt::size2(progress.upload_rate)
+                ),
+            });
+            let _ = tx.send(Event::Progress {
+                id: spec.id,
+                done: progress.done,
+                rate: progress.download_rate as f64,
+                eta: (progress.download_rate > 0)
+                    .then(|| progress.total.saturating_sub(progress.done) / progress.download_rate),
+                conns: vec![],
+                held: vec![],
+                recorded: None,
+            });
+        })
+        .await
+    }
+    .await;
+    match result {
+        Ok(progress) if progress.state == "complete" => {
+            let _ = tx.send(Event::Finished {
+                id: spec.id,
+                elapsed: started.elapsed().as_secs_f64(),
+                size: progress.done,
+            });
+        }
+        Ok(progress) => {
+            let _ = tx.send(Event::Stopped {
+                id: spec.id,
+                done: progress.done,
+                held: vec![],
+            });
+        }
+        Err(error) => {
+            crate::log::error(&format!("plugin {plugin}: transfer failed: {error}"));
+            let _ = tx.send(Event::Failed {
+                id: spec.id,
+                error,
+                done,
+                held: vec![],
+                permission_denied: false,
+            });
+        }
+    }
+}
+
 async fn refresh(
     spec: &StartSpec,
     plugin: &str,
@@ -483,6 +724,9 @@ async fn refresh(
             .unwrap_or_default(),
     };
     let mut context = hya_plugin::manager::ResolveContext {
+        input_file: url::Url::parse(&spec.url)
+            .ok()
+            .and_then(|url| url.to_file_path().ok()),
         proxy: crate::proxy::for_choice(&spec.proxy)?.plugin_proxy(),
         ..Default::default()
     };
@@ -596,7 +840,7 @@ pub(super) async fn with_hooks(
         Ok(()) => Event::Finished {
             id: spec.id,
             elapsed,
-            size: std::fs::metadata(output).map_or(size, |m| m.len()),
+            size: completed_size(std::path::Path::new(&output), size),
         },
         Err(error) => Event::Failed {
             id: spec.id,
@@ -609,9 +853,154 @@ pub(super) async fn with_hooks(
     let _ = tx.send(event);
 }
 
+fn completed_size(path: &std::path::Path, verified: u64) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map_or(verified, |metadata| metadata.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_transfer_probes_once_and_reports_each_progress_frame() {
+        let root = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let library = package.path().join("fixture.so");
+        let status = std::process::Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../hydra-plugin/tests/fixtures/native.c"),
+            )
+            .arg("-o")
+            .arg(&library)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(
+            package.path().join("plugin.wasm"),
+            wat::parse_str(
+                r#"(module
+            (memory (export "memory") 2)
+            (func (export "hydra_api") (result i32) i32.const 1)
+            (func (export "hydra_alloc") (param i32) (result i32) i32.const 4096)
+            (func (export "hydra_call") (param i32 i32 i32 i32) (result i64) i64.const 0))"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            package.path().join("hydra-plugin.toml"),
+            format!(
+                r#"
+            id="example.native"
+            name="Native fixture"
+            version="1.0.0"
+            api=1
+            module="plugin.wasm"
+            [[native_modules]]
+            id="fixture-engine"
+            platform="{}"
+            module="fixture.so"
+            [permissions]
+            native=["fixture-engine"]
+        "#,
+                hya_plugin::native::platform()
+            ),
+        )
+        .unwrap();
+        let grants = hya_plugin::package::load_dir(package.path())
+            .unwrap()
+            .manifest
+            .permissions;
+        let mut manager = hya_plugin::manager::Manager::open(root.path().into()).unwrap();
+        manager.install(package.path(), grants).unwrap();
+        drop(manager);
+        let mut info = crate::plugins::tests::transfer_plan();
+        let transfer = info.plan.transfer.as_mut().unwrap();
+        transfer.engine = "fixture-engine".into();
+        transfer.files.truncate(1);
+        let spec = StartSpec {
+            id: 711,
+            temp_path: output.path().join("resume").to_string_lossy().into_owned(),
+            ..StartSpec::plain()
+        };
+        let final_path = Arc::new(Mutex::new(
+            output.path().join("output").to_string_lossy().into_owned(),
+        ));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        run_transfer(
+            &spec,
+            "example.native",
+            (**transfer).clone(),
+            None,
+            &Arc::new(AtomicBool::new(false)),
+            &final_path,
+            &sender,
+            root.path().into(),
+        )
+        .await;
+        drop(sender);
+        let mut probes = 0;
+        let mut bytes = Vec::new();
+        let mut complete = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                Event::Probed { size, .. } => {
+                    probes += 1;
+                    assert_eq!(size, Some(10));
+                }
+                Event::Progress { done, .. } => bytes.push(done),
+                Event::Finished { size, .. } => {
+                    assert_eq!(size, 10);
+                    complete = true;
+                }
+                Event::Failed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(probes, 1);
+        assert_eq!(bytes, [5, 10]);
+        assert!(complete);
+    }
+
+    #[test]
+    fn native_caps_share_the_budget_and_reserve_bandwidth_for_http() {
+        let first = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let second = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut state = NativeRates {
+            cap: 100,
+            active: 3,
+            transfers: [(1, (0, first.clone())), (2, (25, second.clone()))].into(),
+        };
+        assert_eq!(distribute_native_rates(&state), 41);
+        assert_eq!(first.load(Ordering::Relaxed), 34);
+        assert_eq!(second.load(Ordering::Relaxed), 25);
+        state.cap = 1;
+        state.active = 2;
+        assert_eq!(distribute_native_rates(&state), 1);
+        assert_eq!(first.load(Ordering::Relaxed), 1);
+        assert_eq!(second.load(Ordering::Relaxed), u64::MAX - 1);
+        state.cap = 0;
+        assert_eq!(distribute_native_rates(&state), 0);
+        assert_eq!(first.load(Ordering::Relaxed), 0);
+        assert_eq!(second.load(Ordering::Relaxed), 25);
+    }
+
+    #[test]
+    fn completed_directory_retains_verified_payload_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("payload");
+        std::fs::write(&file, b"payload").unwrap();
+        assert_eq!(completed_size(directory.path(), 128_128), 128_128);
+        assert_eq!(completed_size(&file, 0), 7);
+        assert_eq!(completed_size(&directory.path().join("missing"), 11), 11);
+    }
+
     #[test]
     fn subtitle_sidecars_never_replace_existing_files() {
         let dir = tempfile::tempdir().unwrap();

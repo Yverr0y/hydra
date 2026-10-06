@@ -236,6 +236,10 @@ pub enum Cmd {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    PluginDetails {
+        id: DlId,
+        rows: Vec<Vec<String>>,
+    },
     PluginPrompt(crate::plugins::Prompt),
     Probed {
         id: DlId,
@@ -322,7 +326,7 @@ fn pace_for(own: &Arc<RateLimiter>) -> Pace {
 /// Takes effect on transfers already running, without restarting them: `Pace`
 /// reads the rate on every read, so the Speed Limiter binds what is in flight.
 pub fn set_global_limit(bytes_per_sec: Option<u64>) {
-    global_limiter().set_rate(bytes_per_sec.unwrap_or(0));
+    plugin::set_global_limit(bytes_per_sec.unwrap_or(0));
 }
 
 static POWER_SAVE: AtomicBool = AtomicBool::new(false);
@@ -520,6 +524,7 @@ fn spawn_engine() -> UnboundedSender<Cmd> {
                             crate::log::debug(&format!("#{id} limit -> {limit:?}"));
                             if let Some(l) = live.get(&id) {
                                 l.limiter.set_rate(limit.unwrap_or(0));
+                                plugin::set_native_limit(id, limit.unwrap_or(0));
                             }
                         }
                         Cmd::SetFinalPath(id, path) => {
@@ -541,6 +546,7 @@ fn spawn_engine() -> UnboundedSender<Cmd> {
                         }
                     }
                     live.retain(|_, l| !l.cancel.load(Ordering::Relaxed));
+                    plugin::set_active_count(live.len());
                 }
             });
         })
