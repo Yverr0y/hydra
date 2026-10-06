@@ -1,0 +1,115 @@
+name: Official plugins
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  youtube:
+    name: Verify and build YouTube
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install extractor test dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg minisign
+      - name: Test resolver and build package
+        run: |
+          cargo test --locked --manifest-path plugins/hydra-youtube/Cargo.toml
+          python3 plugins/build.py hydra-youtube
+          cargo build --locked -p hya-cli -p hya-plugin-cli
+      - name: Verify signing and real media transfers
+        env:
+          HYDRA_E2E_SKIP_BUILD: '1'
+        run: |
+          python3 scripts/plugins/signing-e2e.py
+          python3 scripts/plugins/plugin-media-e2e.py
+      - name: Stage verified package
+        run: |
+          mkdir -p target/official-plugin-builds
+          cp plugins/hydra-youtube/youtube-download.hyaplugin target/official-plugin-builds/unsigned-youtube-download.hyaplugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-plugin-build-youtube
+          path: target/official-plugin-builds/*.hyaplugin
+          if-no-files-found: error
+
+  torrent:
+    name: Verify and build Torrent (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.os == 'windows-11-arm' && '3.13' || '3.12' }}
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: bash scripts/plugins/build-torrent-linux.sh
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install boost openssl@3 nlohmann-json
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $triplet = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64-windows-static' } else { 'x64-windows-static' }
+          vcpkg install "boost-headers:$triplet" "openssl:$triplet" "nlohmann-json:$triplet"
+          "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
+          "VCPKG_TARGET_TRIPLET=$triplet" >> $env:GITHUB_ENV
+      - name: Test resolver and build native package
+        shell: bash
+        run: |
+          cargo test --locked --manifest-path plugins/hydra-torrent/Cargo.toml
+          if [ "$RUNNER_OS" = Linux ]; then
+            python plugins/hydra-torrent/build.py --skip-native-build
+          else
+            python plugins/hydra-torrent/build.py
+          fi
+      - name: Install swarm test binding
+        if: matrix.os != 'windows-11-arm'
+        run: python -m pip install libtorrent==2.0.11
+      - name: Exercise native library with a real local swarm
+        if: matrix.os != 'windows-11-arm'
+        shell: bash
+        run: |
+          library=$(find target/torrent-native-static -maxdepth 2 \( -name 'hydra-torrent-native.dylib' -o -name 'hydra-torrent-native.so' -o -name 'hydra-torrent-native.dll' \) -type f | head -n 1)
+          python plugins/hydra-torrent/tests/native.py "$library"
+          cargo build --locked -p hya-cli
+          cli=target/debug/hydra
+          if [ "$RUNNER_OS" = Windows ]; then cli="$cli.exe"; fi
+          package=$(find target -maxdepth 1 -name 'torrent-download-*.hyaplugin' -type f | head -n 1)
+          python plugins/hydra-torrent/tests/cli.py "$library" "$cli" "$package"
+      - name: Exercise Windows ARM64 native library and CLI with real webseed bytes
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          cargo build --locked -p hya-cli
+          python plugins/hydra-torrent/tests/webseed.py target/torrent-native-static/Release/hydra-torrent-native.dll target/debug/hydra.exe target/torrent-download-windows-aarch64.hyaplugin
+      - name: Stage verified package
+        shell: bash
+        run: |
+          mkdir -p target/official-plugin-builds
+          for package in target/torrent-download-*.hyaplugin; do
+            cp "$package" "target/official-plugin-builds/unsigned-$(basename "$package")"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: official-plugin-build-torrent-${{ matrix.os }}
+          path: target/official-plugin-builds/*.hyaplugin
+          if-no-files-found: error
