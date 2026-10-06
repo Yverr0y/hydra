@@ -1131,17 +1131,39 @@ mod tests {
         .unwrap();
     }
     fn official_package(pair: &minisign::KeyPair, version: &str, extra: &str) -> Vec<u8> {
+        official_package_with_native(pair, version, extra, false)
+    }
+
+    fn official_package_with_native(
+        pair: &minisign::KeyPair,
+        version: &str,
+        extra: &str,
+        native: bool,
+    ) -> Vec<u8> {
         let directory = tempfile::tempdir().unwrap();
         fixture(directory.path(), r#"{"skip":true}"#);
         let manifest_path = directory.path().join(package::MANIFEST_NAME);
         let manifest = std::fs::read_to_string(&manifest_path)
             .unwrap()
             .replace("0.1.0", version);
-        let manifest = format!("publisher_key = {:?}\n{extra}\n{manifest}\n[[settings]]\nkey='quality'\nlabel='Quality'\ntype='text'\ndefault='best'\n", pair.pk.to_base64());
+        let mut manifest = format!("publisher_key = {:?}\n{extra}\n{manifest}\n[[settings]]\nkey='quality'\nlabel='Quality'\ntype='text'\ndefault='best'\n", pair.pk.to_base64());
+        if native {
+            manifest = manifest.replace("[permissions]", "[permissions]\nnative=['test-engine']");
+            manifest.push_str(&format!(
+                "\n[[native_modules]]\nid='test-engine'\nplatform='{}'\nmodule='test-native.so'\n",
+                crate::native::platform()
+            ));
+        }
         std::fs::write(&manifest_path, manifest).unwrap();
         let mut entries = BTreeMap::new();
         for name in [package::MANIFEST_NAME, "plugin.wasm"] {
             entries.insert(name, std::fs::read(directory.path().join(name)).unwrap());
+        }
+        if native {
+            entries.insert(
+                "test-native.so",
+                format!("native fixture {version}").into_bytes(),
+            );
         }
         let sums = entries
             .iter()
@@ -1165,6 +1187,38 @@ mod tests {
             archive.write_all(&bytes).unwrap();
         }
         archive.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn official_native_sync_installs_and_updates_while_preserving_transfer_data() {
+        let root = tempfile::tempdir().unwrap();
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let first = official_package_with_native(&pair, "1.0.0", "", true);
+        let second = official_package_with_native(&pair, "1.1.0", "", true);
+        let mut manager = Manager::open(root.path().into()).unwrap();
+        manager
+            .sync_official(&[&first], &pair.pk.to_base64())
+            .unwrap();
+        assert_eq!(manager.list()[0].grants.native, ["test-engine"]);
+        let old_hash = manager.list()[0].native_sha256["test-native.so"].clone();
+        manager.enable("example.direct", false).unwrap();
+        manager
+            .set("example.direct", "quality", Value::Text("small".into()))
+            .unwrap();
+        let checkpoint = root.path().join("example.direct/data/torrent.resume");
+        std::fs::write(&checkpoint, "saved checkpoint").unwrap();
+        manager
+            .sync_official(&[&second], &pair.pk.to_base64())
+            .unwrap();
+        let installed = &manager.list()[0];
+        assert_eq!(installed.manifest.version, "1.1.0");
+        assert_ne!(installed.native_sha256["test-native.so"], old_hash);
+        assert!(!installed.enabled);
+        assert_eq!(installed.settings["quality"], Value::Text("small".into()));
+        assert_eq!(
+            std::fs::read_to_string(checkpoint).unwrap(),
+            "saved checkpoint"
+        );
     }
 
     #[test]
