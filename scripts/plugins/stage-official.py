@@ -28,13 +28,15 @@ def stage(root, version):
             names = set()
             total = 0
             for entry in archive.infolist():
-                parts = pathlib.PurePosixPath(entry.filename).parts
+                name = entry.orig_filename
+                parts = pathlib.PurePosixPath(name).parts
                 platforms = {f"{system}-{architecture}" for system in ["linux", "macos", "windows"]
                              for architecture in ["x86_64", "aarch64"]}
                 valid_path = (len(parts) == 1 or
                               len(parts) == 3 and parts[0] == "native" and parts[1] in platforms)
-                if (not valid_path or entry.filename != pathlib.PurePosixPath(entry.filename).as_posix()
-                        or "\\" in entry.filename or "." in parts or ".." in parts
+                if (not valid_path or name != entry.filename
+                        or name != pathlib.PurePosixPath(name).as_posix()
+                        or "\\" in name or "." in parts or ".." in parts
                         or not entry.filename.endswith(".hyaplugin")
                         or entry.filename in names or entry.file_size > 16 * 1024 * 1024):
                     raise ValueError("invalid official bundle entry")

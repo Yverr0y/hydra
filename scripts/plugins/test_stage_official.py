@@ -19,11 +19,35 @@ def bundle(entries):
         warnings.simplefilter("ignore", UserWarning)
         with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, data in entries:
-                archive.writestr(name, data)
+                entry = zipfile.ZipInfo()
+                entry.filename = name
+                entry.orig_filename = name
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(entry, data)
     return stream.getvalue()
 
 
 class StageOfficialTests(unittest.TestCase):
+    def test_windows_normalization_does_not_hide_backslashes(self):
+        name = "native\\linux-x86_64\\torrent.hyaplugin"
+        data = bundle([(name, b"bad")])
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            destination = root / "plugins/bundled"
+            destination.mkdir(parents=True)
+            (destination / "bundle-version.txt").write_text("1.0.0")
+            (destination / "youtube.hyaplugin").write_bytes(b"retained")
+            with patch.object(zipfile.os, "sep", "\\"):
+                with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                    entry = archive.infolist()[0]
+                    self.assertEqual(entry.orig_filename, name)
+                    self.assertEqual(entry.filename, name.replace("\\", "/"))
+                with patch.object(module.urllib.request, "urlopen", return_value=io.BytesIO(data)):
+                    with self.assertRaisesRegex(ValueError, "invalid official bundle entry"):
+                        module.stage(root, "1.1.0")
+            self.assertEqual((destination / "youtube.hyaplugin").read_bytes(), b"retained")
+            self.assertEqual((destination / "bundle-version.txt").read_text(), "1.0.0")
+
     def test_stages_portable_and_all_native_architectures(self):
         entries = [("youtube.hyaplugin", b"portable")]
         entries += [(f"native/{system}-{architecture}/torrent.hyaplugin", b"native")
