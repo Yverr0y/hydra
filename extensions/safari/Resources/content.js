@@ -696,8 +696,15 @@ function buildPanel() {
     // the thing out from under the hand that is holding it.
     if (!panelDrag) schedulePanelHide();
   });
-  bar.addEventListener("pointerover", () => {
-    if (!panelSingle && !panelDrag) wrap.classList.add("open");
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (!e.composedPath().includes(panelHost)) wrap.classList.remove("open");
+    },
+    true
+  );
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") wrap.classList.remove("open");
   });
 
   // Drag to move.
@@ -799,6 +806,7 @@ function renderRows(el) {
   if (panelCaret) {
     panelCaret.style.display = panelSingle ? "none" : "";
   }
+  if (panelSingle) panelEl.classList.remove("open");
 
   const mkRow = (text, n, onClick, cls = "") => {
     const row = document.createElement("div");
@@ -892,6 +900,7 @@ function showPanel(video) {
   if (!panelEnabled || !video || panelDismissed.has(video)) return;
   if (!panelHost) buildPanel();
   if (!renderRows(video)) return hidePanel();
+  if (panelTarget !== video) panelEl.classList.remove("open");
   clearTimeout(panelTimer);
   panelTarget = video;
   if (panelTitle) {
