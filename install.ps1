@@ -18,14 +18,14 @@
 # Both modes also install hya.exe, a short second name for the CLI - see
 # New-CliAlias.
 #
-# A GUI install also gets a start-menu shortcut (-Desktop adds one on the
-# desktop) and an "Apps & features" entry, so Hydra is listed and uninstallable
-# the way Windows expects — the same things the .exe installer registers.
+# A GUI install also gets start-menu and desktop shortcuts (-Desktop:$false
+# skips the desktop) and an "Apps & features" entry, so Hydra is listed and
+# uninstallable the way Windows expects — the same things the .exe installer registers.
 
 param(
   [switch]$Cli,
   [switch]$Beta,
-  [switch]$Desktop,
+  [switch]$Desktop = $true,
   [string]$Version = "",
   [string]$InstallDir = ""
 )
