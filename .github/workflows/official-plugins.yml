@@ -104,12 +104,23 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then cli="$cli.exe"; fi
           package=$(find target -maxdepth 1 -name 'torrent-download-*.hyaplugin' -type f | head -n 1)
           python plugins/hydra-torrent/tests/cli.py "$library" "$cli" "$package"
+          python plugins/hydra-torrent/tests/magnet.py "$library" "$cli" "$package"
       - name: Exercise Windows ARM64 native library and CLI with real webseed bytes
         if: matrix.os == 'windows-11-arm'
         shell: bash
         run: |
           cargo build --locked -p hya-cli
           python plugins/hydra-torrent/tests/webseed.py target/torrent-native-static/Release/hydra-torrent-native.dll target/debug/hydra.exe target/torrent-download-windows-aarch64.hyaplugin
+          python plugins/hydra-torrent/tests/magnet.py target/torrent-native-static/Release/hydra-torrent-native.dll target/debug/hydra.exe target/torrent-download-windows-aarch64.hyaplugin
+      - name: Preserve Windows native crash symbols
+        if: runner.os == 'Windows' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: torrent-native-symbols-${{ matrix.os }}
+          path: |
+            target/torrent-native-static/Release/hydra-torrent-native.dll
+            target/torrent-native-static/Release/hydra-torrent-native.pdb
+          if-no-files-found: warn
       - name: Stage verified package
         shell: bash
         run: |
