@@ -172,6 +172,7 @@ const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub enum ExtEvent {
     /// Local file association asks for package review, never silent installation.
     InstallPlugin(std::path::PathBuf),
+    InstallPluginUrl(String),
     /// Single captured download -> Download File Info dialog.
     Download(ExtDownload, Ack),
     /// A manifest -> the stream-aware download path.
@@ -221,6 +222,12 @@ fn sender() -> UnboundedSender<ExtEvent> {
         tx
     })
     .clone()
+}
+
+pub(crate) fn install_plugin_link(link: &str) -> Result<(), String> {
+    let source = crate::plugin_link::package_url(link)?;
+    let _ = sender().send(ExtEvent::InstallPluginUrl(source));
+    Ok(())
 }
 
 pub(crate) fn install_plugin_file(path: std::path::PathBuf) {
@@ -350,7 +357,11 @@ fn make_token() -> String {
 /// it is asked to quit, and once its socket goes dark this returns `false`
 /// so the caller boots as the new instance. Builds that predate "shutdown"
 /// refuse it as unknown; they get the classic hand-over.
-pub fn signal_existing(minimized: bool, plugin_file: Option<&std::path::Path>) -> bool {
+pub fn signal_existing(
+    minimized: bool,
+    plugin_file: Option<&std::path::Path>,
+    plugin_link: Option<&str>,
+) -> bool {
     let Ok(text) = std::fs::read_to_string(crate::model::app_dir().join("ipc.json")) else {
         return false;
     };
@@ -376,6 +387,9 @@ pub fn signal_existing(minimized: bool, plugin_file: Option<&std::path::Path>) -
         let mut body = serde_json::json!({"type":kind,"token":token});
         if kind == "install-plugin" {
             body["path"] = serde_json::json!(plugin_file?.to_str()?);
+        }
+        if kind == "install-plugin-link" {
+            body["link"] = serde_json::json!(plugin_link?);
         }
         writeln!(out, "{body}").ok()?;
         let mut line = String::new();
@@ -403,6 +417,9 @@ pub fn signal_existing(minimized: bool, plugin_file: Option<&std::path::Path>) -
         // Still alive after 5 s (wedged exit path?): treat it as the owner.
     }
 
+    if plugin_link.is_some() {
+        return request("install-plugin-link").is_some_and(|reply| acked(&reply));
+    }
     if plugin_file.is_some() {
         return request("install-plugin").is_some_and(|reply| acked(&reply));
     }
@@ -545,6 +562,12 @@ fn dispatch(req: &serde_json::Value, allowed: bool) -> serde_json::Value {
         Some("shutdown") if allowed => {
             let _ = sender().send(ExtEvent::Shutdown);
             (true, None)
+        }
+        Some("install-plugin-link") if allowed => {
+            match req.get("link").and_then(|link| link.as_str()) {
+                Some(link) if install_plugin_link(link).is_ok() => (true, None),
+                _ => (false, Some("invalid plugin install link")),
+            }
         }
         Some("install-plugin") if allowed => match req
             .get("path")
@@ -1084,6 +1107,22 @@ mod tests {
             panic!("package review event expected")
         };
         assert_eq!(received, path);
+        let link = serde_json::json!({"type":"install-plugin-link", "link":"hydra://install-plugin?url=https%3A%2F%2Fexample.com%2Fa.hyaplugin"});
+        assert!(!ok(dispatch(&link, false)));
+        assert!(ok(dispatch(&link, true)));
+        let Some(ExtEvent::InstallPluginUrl(received)) = rx.blocking_recv() else {
+            panic!("URL review event expected")
+        };
+        assert_eq!(received, "https://example.com/a.hyaplugin");
+        assert!(!ok(dispatch(
+            &serde_json::json!({"type":"install-plugin-link"}),
+            true
+        )));
+        assert!(!ok(dispatch(
+            &serde_json::json!({"type":"install-plugin-link", "link":"hydra://install-plugin?url=file:///tmp/a.hyaplugin"}),
+            true
+        )));
+
         for invalid in ["relative.hyaplugin", "/tmp/not-a-package.txt"] {
             assert!(!ok(dispatch(
                 &serde_json::json!({"type":"install-plugin", "path":invalid}),

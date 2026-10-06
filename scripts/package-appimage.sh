@@ -171,12 +171,13 @@ Type=Application
 Name=Hydra Download Manager
 GenericName=Download Manager
 Comment=Multi-connection download accelerator
-Exec=AppRun
+Exec=AppRun %u
 Icon=hydra
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=download;manager;accelerator;torrent;http;
 StartupWMClass=hydra
+MimeType=x-scheme-handler/hydra;application/x-hydra-plugin;
 EOF
 cp "$APPDIR/usr/share/applications/hydra.desktop" "$APPDIR/hydra.desktop"
 
@@ -353,11 +354,12 @@ Type=Application
 Name=Hydra Download Manager
 GenericName=Download Manager
 Comment=Multi-connection download accelerator
-Exec="$APPIMAGE"
+Exec="$APPIMAGE" %u
 Icon=$DATA/hydra.png
 Terminal=false
 Categories=Network;FileTransfer;
 StartupWMClass=hydra
+MimeType=x-scheme-handler/hydra;application/x-hydra-plugin;
 X-AppImage-Version=$HYDRA_VERSION
 DESKTOPEOF
   chmod 644 "$APPS/hydra.desktop"

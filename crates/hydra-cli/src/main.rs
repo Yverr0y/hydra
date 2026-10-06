@@ -405,6 +405,13 @@ async fn async_main() -> std::process::ExitCode {
             };
         }
     };
+    #[cfg(debug_assertions)]
+    if let Some(url) = &args.debug_plugin_catalog {
+        if let Err(error) = hya_plugin::distribution::configure_debug_catalog(url) {
+            eprintln!("hydra: --debug-plugin-catalog: {error}");
+            return std::process::ExitCode::from(2);
+        }
+    }
     let _no_input = args.no_input.then(plugin_ui::Headless::enter);
     if args.verbose > 0 && dialect != compat::Personality::Native {
         eprintln!("hydra: {} compatibility mode", dialect.name());

@@ -137,7 +137,7 @@ pub struct Page {
     pub review_signing: hya_plugin::package::Signing,
     pub busy: bool,
     pub permission_details: bool,
-    pub pending_file: Option<std::path::PathBuf>,
+    pub pending_source: Option<String>,
     pub error: Option<String>,
     pub logs: String,
     pub welcome: Option<(String, String)>,
@@ -155,6 +155,8 @@ pub enum Message {
     IndexAdd,
     IndexRemove(String),
     CheckUpdates,
+    CheckUpdate(String),
+    UpdateLoaded(String, Result<Vec<hya_plugin::distribution::Entry>, String>),
     UpdatesLoaded(Result<Vec<hya_plugin::distribution::Entry>, String>),
     ReviewUpdate(hya_plugin::distribution::Entry),
     LogsLoaded(String, Result<String, String>),
@@ -213,10 +215,42 @@ fn reset_scroll() -> Task<crate::app::Message> {
     iced::widget::operation::scroll_to("plugin-page", scrollable::AbsoluteOffset::<f32>::default())
 }
 
-fn resume_file(page: &mut Page) -> Task<crate::app::Message> {
-    page.pending_file.take().map_or_else(Task::none, |path| {
-        Task::done(crate::app::Message::InstallPluginFile(path))
-    })
+fn resume_source(page: &mut Page) -> Task<crate::app::Message> {
+    page.pending_source
+        .take()
+        .map_or_else(Task::none, |source| {
+            Task::done(crate::app::Message::InstallPluginSource(source))
+        })
+}
+
+fn check_updates(page: &mut Page, id: Option<String>) -> Task<crate::app::Message> {
+    if page.busy {
+        return Task::none();
+    }
+    page.busy = true;
+    page.error = None;
+    let response_id = id.clone();
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let manager = manager()?;
+                hya_plugin::distribution::updates(
+                    &crate::model::app_dir().join("plugins"),
+                    manager.list(),
+                    id.as_deref(),
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
+        },
+        move |result| {
+            wrap(match &response_id {
+                Some(id) => Message::UpdateLoaded(id.clone(), result),
+                None => Message::UpdatesLoaded(result),
+            })
+        },
+    )
 }
 
 pub fn update(app: &mut App, message: Message) -> Task<crate::app::Message> {
@@ -241,34 +275,31 @@ pub fn update(app: &mut App, message: Message) -> Task<crate::app::Message> {
                 Ok(updates) => page.updates = updates,
                 Err(error) => page.error = Some(error),
             }
-            resume_file(page)
+            resume_source(page)
         }
-        Message::CheckUpdates => {
-            if page.busy {
-                return Task::none();
+        Message::CheckUpdates => check_updates(page, None),
+        Message::CheckUpdate(id) => check_updates(page, Some(id)),
+        Message::UpdateLoaded(id, result) => {
+            page.busy = false;
+            match result {
+                Ok(updates) => {
+                    page.updates.retain(|entry| entry.id != id);
+                    page.updates
+                        .extend(updates.into_iter().filter(|entry| entry.id == id));
+                }
+                Err(error) => page.error = Some(error),
             }
-            page.busy = true;
-            Task::perform(
-                async {
-                    tokio::task::spawn_blocking(|| {
-                        let manager = manager()?;
-                        hya_plugin::distribution::updates(
-                            &crate::model::app_dir().join("plugins"),
-                            manager.list(),
-                            None,
-                        )
-                        .map_err(|e| e.to_string())
-                    })
-                    .await
-                    .unwrap_or_else(|e| Err(e.to_string()))
-                },
-                |r| wrap(Message::UpdatesLoaded(r)),
-            )
+            resume_source(page)
         }
         Message::ReviewUpdate(entry) => {
             if page.busy {
                 return Task::none();
             }
+            page.path = entry.package.clone();
+            page.review = None;
+            page.prepared = None;
+            page.error = None;
+            page.welcome = None;
             page.busy = true;
             Task::perform(
                 async move {
@@ -355,6 +386,14 @@ pub fn update(app: &mut App, message: Message) -> Task<crate::app::Message> {
         Message::Loaded(result) => {
             match result {
                 Ok((list, indexes)) => {
+                    page.updates.retain(|entry| {
+                        list.iter()
+                            .find(|plugin| plugin.manifest.id == entry.id)
+                            .is_some_and(|plugin| {
+                                semver::Version::parse(&entry.version).ok()
+                                    > semver::Version::parse(&plugin.manifest.version).ok()
+                            })
+                    });
                     page.installed = list;
                     page.indexes = indexes;
                 }
@@ -364,8 +403,8 @@ pub fn update(app: &mut App, message: Message) -> Task<crate::app::Message> {
         }
         Message::Reviewed(result) => {
             page.busy = false;
-            if page.pending_file.is_some() {
-                return resume_file(page);
+            if page.pending_source.is_some() {
+                return resume_source(page);
             }
             match *result {
                 Ok((manifest, signing, prepared)) => {
@@ -417,7 +456,7 @@ pub fn update(app: &mut App, message: Message) -> Task<crate::app::Message> {
                 }
                 Err(e) => page.error = Some(e),
             };
-            Task::batch([load(), resume_file(page)])
+            Task::batch([load(), resume_source(page)])
         }
         operation => {
             if page.busy {
@@ -864,6 +903,60 @@ pub fn view(app: &App) -> El<'_> {
         }
         for (index, installed) in p.installed.iter().enumerate() {
             let id = &installed.manifest.id;
+            let available = p.updates.iter().find(|entry| entry.id == *id);
+            let mut description = column![
+                text(format!(
+                    "{}{}",
+                    installed.manifest.name,
+                    if installed.dev { " (dev)" } else { "" }
+                ))
+                .size(theme::FONT_SIZE),
+                text(format!(
+                    "{} · {} · {}",
+                    installed.manifest.version,
+                    installed.manifest.id,
+                    installed.manifest.author.as_deref().unwrap_or("—")
+                ))
+                .size(theme::FONT_SIZE - 1.0)
+                .color(theme::dim_text(&iced::Theme::Light)),
+            ]
+            .spacing(3)
+            .width(iced::Length::Fill);
+            if let Some(entry) = available {
+                description = description.push(
+                    container(
+                        text(format!(
+                            "{} · {}",
+                            tr("Plugin update available"),
+                            entry.version
+                        ))
+                        .size(theme::FONT_SIZE - 1.0),
+                    )
+                    .padding([2, 6])
+                    .style(|_| container::Style {
+                        background: Some(theme::success_text().scale_alpha(0.12).into()),
+                        text_color: Some(theme::success_text()),
+                        border: iced::Border {
+                            color: theme::success_text().scale_alpha(0.4),
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        },
+                        ..Default::default()
+                    }),
+                );
+            }
+            let update_button = match available {
+                Some(entry) => icon_button(
+                    crate::icons::resume(!p.busy),
+                    tr("Install plugin update"),
+                    (!p.busy).then(|| Message::ReviewUpdate(entry.clone())),
+                ),
+                None => icon_button(
+                    crate::icons::refresh(!p.busy),
+                    tr("Check for updates"),
+                    (!p.busy).then(|| Message::CheckUpdate(id.clone())),
+                ),
+            };
             body = body.push(
                 container(
                     row![
@@ -871,24 +964,8 @@ pub fn view(app: &App) -> El<'_> {
                             let id = id.clone();
                             move |enabled| wrap(Message::Enable(id.clone(), enabled))
                         }),
-                        column![
-                            text(format!(
-                                "{}{}",
-                                installed.manifest.name,
-                                if installed.dev { " (dev)" } else { "" }
-                            ))
-                            .size(theme::FONT_SIZE),
-                            text(format!(
-                                "{} · {} · {}",
-                                installed.manifest.version,
-                                installed.manifest.id,
-                                installed.manifest.author.as_deref().unwrap_or("—")
-                            ))
-                            .size(theme::FONT_SIZE - 1.0)
-                            .color(theme::dim_text(&iced::Theme::Light))
-                        ]
-                        .spacing(3)
-                        .width(iced::Length::Fill),
+                        description,
+                        update_button,
                         icon_button(
                             crate::icons::options(!p.busy),
                             tr("Plugin settings"),
@@ -956,20 +1033,22 @@ pub fn view(app: &App) -> El<'_> {
                     .on_input(|v| wrap(Message::IndexKey(v))),
             );
         for source in &p.indexes {
-            body = body.push(
-                row![
-                    text(source.url.clone())
-                        .size(theme::FONT_SIZE)
-                        .width(iced::Length::Fill),
+            let index = row![text(source.url.clone())
+                .size(theme::FONT_SIZE)
+                .width(iced::Length::Fill),]
+            .spacing(8);
+            body = body.push(if source.is_default() {
+                index.push(text(tr("Default catalog (read-only)")).size(theme::FONT_SIZE))
+            } else {
+                index.push(
                     button(text(tr("Remove index")).size(theme::FONT_SIZE))
                         .padding([5, 10])
                         .style(theme::btn)
                         .on_press_maybe(
-                            (!p.busy).then(|| wrap(Message::IndexRemove(source.url.clone())))
-                        )
-                ]
-                .spacing(8),
-            );
+                            (!p.busy).then(|| wrap(Message::IndexRemove(source.url.clone()))),
+                        ),
+                )
+            });
         }
         body = body.push(
             button(text(tr("Check plugin updates")).size(theme::FONT_SIZE))
@@ -977,22 +1056,6 @@ pub fn view(app: &App) -> El<'_> {
                 .style(theme::btn)
                 .on_press_maybe((!p.busy).then_some(wrap(Message::CheckUpdates))),
         );
-        for entry in &p.updates {
-            body = body.push(
-                row![
-                    text(format!("{} {}", entry.name, entry.version))
-                        .size(theme::FONT_SIZE)
-                        .width(iced::Length::Fill),
-                    button(text(tr("Review update")).size(theme::FONT_SIZE))
-                        .padding([5, 10])
-                        .style(theme::btn)
-                        .on_press_maybe(
-                            (!p.busy).then(|| wrap(Message::ReviewUpdate(entry.clone())))
-                        )
-                ]
-                .spacing(8),
-            );
-        }
     }
     if let Some(error) = &p.error {
         body = body.push(
@@ -1472,6 +1535,123 @@ pub(crate) mod tests {
         ));
         assert_eq!(app.add_url.error.as_deref(), Some("resolver failed"));
     }
+    #[test]
+    fn reviewing_an_update_discards_previous_consent_and_uses_the_catalog_package_url() {
+        let mut app = App::default();
+        app.options.plugins.review = Some(
+            toml::from_str(include_str!(
+                "../../../plugins/hydra-youtube/hydra-plugin.toml"
+            ))
+            .unwrap(),
+        );
+        app.options.plugins.path = "old-package.hyaplugin".into();
+        app.options.plugins.error = Some("old error".into());
+        let entry = hya_plugin::distribution::parse_index(
+            include_bytes!("../../../docs/plugins.json"),
+            None,
+            None,
+        )
+        .unwrap()
+        .plugins
+        .remove(0);
+        let source = entry.package.clone();
+        dispatch(&mut app, Message::ReviewUpdate(entry));
+        assert_eq!(app.options.plugins.path, source);
+        assert!(app.options.plugins.review.is_none());
+        assert!(app.options.plugins.error.is_none());
+        assert!(app.options.plugins.busy);
+        dispatch(
+            &mut app,
+            Message::Reviewed(Box::new(Err("download failed".into()))),
+        );
+        assert!(app.options.plugins.review.is_none());
+        assert!(app.options.plugins.prepared.is_none());
+        assert_eq!(
+            app.options.plugins.error.as_deref(),
+            Some("download failed")
+        );
+    }
+
+    #[test]
+    fn checking_one_plugin_preserves_other_badges_and_clears_its_own_when_current() {
+        let mut app = App::default();
+        let mut available = hya_plugin::distribution::parse_index(
+            include_bytes!("../../../docs/plugins.json"),
+            None,
+            None,
+        )
+        .unwrap()
+        .plugins
+        .remove(0);
+        available.version = "0.2.0".into();
+        let id = available.id.clone();
+        let mut other = available.clone();
+        other.id = "community.other".into();
+        app.options.plugins.updates = vec![other.clone()];
+        dispatch(&mut app, Message::CheckUpdate(id.clone()));
+        assert!(app.options.plugins.busy);
+        dispatch(&mut app, Message::CheckUpdate(other.id.clone()));
+        dispatch(
+            &mut app,
+            Message::UpdateLoaded(id.clone(), Ok(vec![available.clone()])),
+        );
+        assert!(!app.options.plugins.busy);
+        assert_eq!(app.options.plugins.updates.len(), 2);
+        assert!(app
+            .options
+            .plugins
+            .updates
+            .iter()
+            .any(|entry| entry.id == other.id));
+        dispatch(
+            &mut app,
+            Message::UpdateLoaded(id.clone(), Err("unreachable catalog".into())),
+        );
+        assert_eq!(app.options.plugins.updates.len(), 2);
+        assert_eq!(
+            app.options.plugins.error.as_deref(),
+            Some("unreachable catalog")
+        );
+        dispatch(&mut app, Message::CheckUpdate(id.clone()));
+        assert!(app.options.plugins.error.is_none());
+        dispatch(&mut app, Message::UpdateLoaded(id, Ok(vec![])));
+        assert_eq!(app.options.plugins.updates.len(), 1);
+        assert_eq!(app.options.plugins.updates[0].id, other.id);
+    }
+
+    #[test]
+    fn reloading_installed_plugins_removes_completed_catalog_updates() {
+        let mut app = App::default();
+        let index = hya_plugin::distribution::parse_index(
+            include_bytes!("../../../docs/plugins.json"),
+            None,
+            None,
+        )
+        .unwrap();
+        let mut manifest: Manifest = toml::from_str(include_str!(
+            "../../../plugins/hydra-youtube/hydra-plugin.toml"
+        ))
+        .unwrap();
+        manifest.version = "0.0.1".into();
+        let mut installed: Installed = serde_json::from_value(serde_json::json!({
+            "manifest": manifest, "directory": "plugins/hydra.youtube", "dev": false,
+            "enabled": true, "grants": {}, "pins": {}
+        }))
+        .unwrap();
+        app.options.plugins.updates = index.plugins;
+        let indexes =
+            hya_plugin::distribution::sources(tempfile::tempdir().unwrap().path()).unwrap();
+        dispatch(
+            &mut app,
+            Message::Loaded(Ok((vec![installed.clone()], indexes.clone()))),
+        );
+        assert_eq!(app.options.plugins.updates.len(), 1);
+        assert!(app.options.plugins.indexes[0].is_default());
+        installed.manifest.version = "0.1.0".into();
+        dispatch(&mut app, Message::Loaded(Ok((vec![installed], indexes))));
+        assert!(app.options.plugins.updates.is_empty());
+    }
+
     #[test]
     fn settings_navigation_discards_secret_edits_and_reports_async_errors() {
         let mut app = App::default();

@@ -1226,6 +1226,7 @@ pub enum ConfirmKind {
 pub enum Message {
     Plugin(crate::plugins::Message),
     InstallPluginFile(std::path::PathBuf),
+    InstallPluginSource(String),
     PluginProbe,
     PluginAudioOnly(bool),
     PluginAudioFormat(String),
@@ -3977,6 +3978,9 @@ impl App {
                 let text = urls.join("\n");
                 Task::batch([open, self.update(Message::BatchLoaded(Some(text)))])
             }
+            crate::extbus::ExtEvent::InstallPluginUrl(source) => {
+                self.update(Message::InstallPluginSource(source))
+            }
             crate::extbus::ExtEvent::InstallPlugin(path) => {
                 self.update(Message::InstallPluginFile(path))
             }
@@ -6600,10 +6604,13 @@ impl App {
             // and Open / Open folder then act on the file where it now is.
             Message::MoveRename(id) => self.move_rename(id, self.win_of(WinKind::Complete(id))),
 
-            Message::InstallPluginFile(path) => {
+            Message::InstallPluginFile(path) => self.update(Message::InstallPluginSource(
+                path.to_string_lossy().into_owned(),
+            )),
+            Message::InstallPluginSource(source) => {
                 let open = self.open_options(Some(OptTab::Plugins));
                 if self.options.plugins.busy {
-                    self.options.plugins.pending_file = Some(path);
+                    self.options.plugins.pending_source = Some(source);
                     return open;
                 }
                 self.options.plugins.detail = None;
@@ -6611,7 +6618,7 @@ impl App {
                 self.options.plugins.review = None;
                 self.options.plugins.prepared = None;
                 self.options.plugins.welcome = None;
-                self.options.plugins.path = path.to_string_lossy().into_owned();
+                self.options.plugins.path = source;
                 let review = crate::plugins::update(self, crate::plugins::Message::Review);
                 Task::batch([open, review])
             }
@@ -12573,15 +12580,34 @@ mod tests {
         assert!(app.options.plugins.installed.is_empty());
         let queued = std::path::absolute("another.hyaplugin").unwrap();
         let _ = app.update(Message::InstallPluginFile(queued.clone()));
-        assert_eq!(app.options.plugins.pending_file, Some(queued));
+        assert_eq!(
+            app.options.plugins.pending_source,
+            Some(queued.to_string_lossy().into_owned())
+        );
         assert_eq!(app.options.plugins.path, path.to_string_lossy());
         let _ = crate::plugins::update(
             &mut app,
             crate::plugins::Message::Reviewed(Box::new(Err("old package error".into()))),
         );
-        assert!(app.options.plugins.pending_file.is_none());
+        assert!(app.options.plugins.pending_source.is_none());
         assert!(app.options.plugins.error.is_none());
         assert!(!app.options.plugins.busy);
+    }
+
+    #[test]
+    fn browser_plugin_sources_open_review_and_queue_while_busy() {
+        let mut app = App::default();
+        let source = "https://example.com/youtube.hyaplugin".to_string();
+        let _ = app.update(Message::InstallPluginSource(source.clone()));
+        assert_eq!(app.options.tab, OptTab::Plugins);
+        assert_eq!(app.options.plugins.path, source);
+        assert!(app.options.plugins.busy);
+        assert!(app.options.plugins.prepared.is_none());
+        assert!(app.options.plugins.installed.is_empty());
+        let next = "https://example.com/another.hyaplugin".to_string();
+        let _ = app.update(Message::InstallPluginSource(next.clone()));
+        assert_eq!(app.options.plugins.pending_source, Some(next));
+        assert_eq!(app.options.plugins.path, source);
     }
 
     #[test]

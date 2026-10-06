@@ -428,6 +428,10 @@ pub enum UrlMode {
       Flags hydra cannot honour are REFUSED with a reason, never ignored."
 )]
 pub struct Cli {
+    /// Use a localhost HTTP plugin catalog for isolated debug E2E tests.
+    #[cfg(debug_assertions)]
+    #[arg(long, global = true)]
+    pub debug_plugin_catalog: Option<String>,
     /// URLs to download.
     ///
     /// Several URLs mean several FILES by default (`--mode same|queue`). Pass `--mirrors`

@@ -13,6 +13,8 @@ name = "hydra-gui"
 path = "src/main.rs"
 
 [dependencies]
+url = "2.5.8"
+semver = "1"
 tempfile = "3"
 hya-plugin = { path = "../hydra-plugin" }
 hya-plugin-api = { path = "../hydra-plugin-api" }

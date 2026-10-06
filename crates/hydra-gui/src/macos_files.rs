@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Javad Rajabzadeh
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Routes Finder document-open events to the existing package-review flow.
+//! Routes Finder document-open and browser install events to the existing package-review flow.
 
 use std::ffi::CStr;
 
@@ -32,7 +32,7 @@ extern "C-unwind" fn open_urls(
     _application: &AnyObject,
     urls: &AnyObject,
 ) {
-    // SAFETY: AppKit supplies an NSArray of NSURLs; only file URLs have paths forwarded.
+    // SAFETY: AppKit supplies an NSArray of NSURLs retained for this callback.
     unsafe {
         let count: usize = msg_send![urls, count];
         for index in 0..count {
@@ -42,6 +42,15 @@ extern "C-unwind" fn open_urls(
                 let path: *const AnyObject = msg_send![&*url, path];
                 if !path.is_null() {
                     forward_string(&*path);
+                }
+            } else {
+                let address: *const AnyObject = msg_send![&*url, absoluteString];
+                if !address.is_null() {
+                    let pointer: *const std::ffi::c_char = msg_send![&*address, UTF8String];
+                    if !pointer.is_null() {
+                        let link = CStr::from_ptr(pointer).to_string_lossy();
+                        let _ = crate::extbus::install_plugin_link(&link);
+                    }
                 }
             }
         }
