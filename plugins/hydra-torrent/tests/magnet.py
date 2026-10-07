@@ -1,17 +1,20 @@
 """Resolve magnets through a local BEP 9 peer without a libtorrent Python wheel."""
 import ctypes
 import hashlib
+import http.server
 import json
 import os
 from pathlib import Path
 import re
 import socketserver
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 from webseed import bencode
 
@@ -110,6 +113,58 @@ def main():
         assert plan["transfer"]["files"] == [{"index": 0, "path": "magnet-fixture.bin", "size": 1}], plan
         assert plan["transfer"]["output"] == "file", plan
 
+    def inspect_with_https_tracker(peer_port, version):
+        handshakes = []
+        peers = b"\x7f\x00\x00\x01" + struct.pack("!H", peer_port)
+
+        class Tracker(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                response = bencode({b"interval": 60, b"peers": peers})
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *_):
+                pass
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = context.maximum_version = version
+        fixtures = Path(__file__).parent / "fixtures"
+        context.load_cert_chain(fixtures / "tracker-cert.pem", fixtures / "tracker-key.pem")
+
+        class HttpsTracker(http.server.ThreadingHTTPServer):
+            def get_request(self):
+                connection, address = super().get_request()
+                connection.settimeout(10)
+                try:
+                    connection = context.wrap_socket(connection, server_side=True)
+                except ssl.SSLError:
+                    handshakes.append("certificate rejected")
+                    connection.close()
+                    raise
+                handshakes.append(connection.version())
+                return connection, address
+
+        with HttpsTracker(("127.0.0.1", 0), Tracker) as https_tracker, http.server.ThreadingHTTPServer(("127.0.0.1", 0), Tracker) as http_tracker:
+            threads = [threading.Thread(target=server.serve_forever) for server in (https_tracker, http_tracker)]
+            for thread in threads:
+                thread.start()
+            try:
+                trackers = [f"https://127.0.0.1:{https_tracker.server_port}/announce",
+                            f"http://127.0.0.1:{http_tracker.server_port}/announce"]
+                magnet = f"magnet:?xt=urn:btih:{info_hash.hex()}" + "".join(
+                    "&tr=" + urllib.parse.quote(tracker, safe="") for tracker in trackers)
+                status, frames = inspect(magnet)
+                assert status == 0, frames
+                assert_plan(frames[-1])
+                assert handshakes, "magnet resolution skipped the HTTPS tracker"
+            finally:
+                https_tracker.shutdown()
+                http_tracker.shutdown()
+                for thread in threads:
+                    thread.join()
+
     with Server(("127.0.0.1", 0), Peer) as server:
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
@@ -125,6 +180,8 @@ def main():
                 assert_plan(frames[-1])
             status, frames = inspect(magnet, reject=True)
             assert status != 0 and "rejected" in frames[-1]["error"], frames
+            for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+                inspect_with_https_tracker(server.server_address[1], version)
             with tempfile.TemporaryDirectory() as temporary:
                 environment = dict(os.environ, HYDRA_CONFIG_DIR=str(Path(temporary) / "profile"))
                 subprocess.run([str(cli), "plugin", "install", str(package), "--accept-permissions"],
@@ -140,7 +197,7 @@ def main():
             thread.join()
     assert not failures, failures
     assert len(requests) >= 5, requests
-    print("PASS: magnet metadata, cancellation, invalid input, rejected callback and installed CLI resolution")
+    print("PASS: magnet metadata, TLS 1.2/1.3 tracker fallback, cancellation, invalid input, rejected callback and installed CLI resolution")
 
 
 if __name__ == "__main__":

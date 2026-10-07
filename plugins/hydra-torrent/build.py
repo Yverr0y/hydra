@@ -20,10 +20,16 @@ def main():
     parser.add_argument("--native-build", type=Path, default=REPOSITORY / "target/torrent-native-static")
     parser.add_argument("--system-engine", action="store_true", help="Link an installed libtorrent; the resulting package requires its shared libraries")
     parser.add_argument("--skip-native-build", action="store_true", help="Package an existing native build, including builds made in a compatibility container")
+    parser.add_argument("--platform", choices=[f"{system}-{arch}" for system in ("macos", "linux", "windows") for arch in ("aarch64", "x86_64")], help="Target of an existing cross-compiled native build")
     args = parser.parse_args()
     system = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[platform.system()]
     architecture = {"arm64": "aarch64", "ARM64": "aarch64", "aarch64": "aarch64", "AMD64": "x86_64", "x86_64": "x86_64"}[platform.machine()]
     key = f"{system}-{architecture}"
+    if args.platform and args.platform != key:
+        if not args.skip_native_build:
+            parser.error("cross-platform packaging requires --skip-native-build")
+        key = args.platform
+        system, architecture = key.split("-", 1)
     suffix = {"macos": "dylib", "linux": "so", "windows": "dll"}[system]
     output = (args.output or REPOSITORY / "target" / f"torrent-download-{key}.hyaplugin").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -56,10 +62,11 @@ def main():
         (staging / "hydra-plugin.toml").write_text(manifest)
         shutil.copy(library, staging / selected["module"])
         license_text = "Hydra torrent plugin: MIT OR Apache-2.0.\n\n"
-        for source in [REPOSITORY / "LICENSE-MIT", REPOSITORY / "LICENSE-APACHE", build / "_deps/libtorrent-src/LICENSE", ROOT / "native/third-party-licenses.txt"]:
+        for source in [REPOSITORY / "LICENSE-MIT", REPOSITORY / "LICENSE-APACHE", build / "_deps/libtorrent-src/LICENSE", ROOT / "native/third-party-licenses.txt", build / "LICENSE-extra"]:
             if source.is_file():
                 license_text += source.read_text() + "\n\n"
         (staging / "LICENSE").write_text(license_text)
+        output.with_suffix(".LICENSE").write_text(license_text)
         tool = ["cargo", "run", "--manifest-path", str(REPOSITORY / "Cargo.toml"), "-p", "hya-plugin-cli", "--"]
         subprocess.run(tool + ["build", str(staging), "--output", str(output)], check=True)
         subprocess.run(tool + ["validate", str(output)], check=True)
