@@ -331,7 +331,12 @@ impl DownloadItem {
         use crate::i18n::tr;
         match self.state {
             DlState::Complete => tr("Complete"),
-            DlState::Paused => tr("Paused"),
+            DlState::Paused => match self.size {
+                Some(s) if s > 0 => {
+                    format!("{} ({})", tr("Paused"), crate::fmt::pct(self.downloaded, s))
+                }
+                _ => tr("Paused"),
+            },
             DlState::Queued => tr("Queued"),
             DlState::Error => tr("Error"),
             DlState::Connecting => tr("Connecting..."),
@@ -2998,5 +3003,97 @@ mod tests {
         assert_eq!(free_queue_name(&queues, "Queue"), "Queue 2");
         let queues = [q("Queue 1"), q("Queue 2")];
         assert_eq!(free_queue_name(&queues, "Queue"), "Queue 3");
+    }
+
+    fn test_download(state: DlState, size: Option<u64>, downloaded: u64) -> DownloadItem {
+        DownloadItem {
+            id: 1,
+            url: "https://example.com/test.zip".into(),
+            file_name: "test.zip".into(),
+            save_dir: "/tmp".into(),
+            category: None,
+            description: String::new(),
+            size,
+            downloaded,
+            state,
+            error: None,
+            resume: None,
+            added: 0,
+            last_try: None,
+            queue: None,
+            q_order: 0,
+            auth: None,
+            cookies: None,
+            cookie_source: None,
+            referer: None,
+            speed_limit: None,
+            limit_paused: false,
+            held: vec![],
+            part_path: None,
+            rate: 0.0,
+            retries: 0,
+            disp_progress: 0.0,
+            eta_secs: None,
+            recorded_secs: None,
+            conns: vec![],
+            plugin_details: vec![],
+            status_line: String::new(),
+            shutdown_after: false,
+            shutdown_action: PowerAction::default(),
+            stream: None,
+            plugin_plan: None,
+            metalink: None,
+            name_locked: false,
+            proxy: ProxyChoice::default(),
+        }
+    }
+
+    #[test]
+    fn paused_status_text_shows_percentage_when_size_is_known() {
+        let item = test_download(DlState::Paused, Some(10_000), 1034);
+        assert_eq!(item.status_text(), "Paused (10.34%)");
+
+        let zero_pct = test_download(DlState::Paused, Some(1000), 0);
+        assert_eq!(zero_pct.status_text(), "Paused (0.00%)");
+
+        let full_pct = test_download(DlState::Paused, Some(1000), 1000);
+        assert_eq!(full_pct.status_text(), "Paused (100.00%)");
+    }
+
+    #[test]
+    fn paused_status_text_omits_percentage_when_size_is_unknown_or_zero() {
+        let no_size = test_download(DlState::Paused, None, 500);
+        assert_eq!(no_size.status_text(), "Paused");
+
+        let zero_size = test_download(DlState::Paused, Some(0), 0);
+        assert_eq!(zero_size.status_text(), "Paused");
+    }
+
+    #[test]
+    fn status_text_preserves_other_states() {
+        assert_eq!(
+            test_download(DlState::Complete, Some(1000), 1000).status_text(),
+            "Complete"
+        );
+        assert_eq!(
+            test_download(DlState::Queued, Some(1000), 0).status_text(),
+            "Queued"
+        );
+        assert_eq!(
+            test_download(DlState::Error, Some(1000), 500).status_text(),
+            "Error"
+        );
+        assert_eq!(
+            test_download(DlState::Connecting, Some(1000), 0).status_text(),
+            "Connecting..."
+        );
+        assert_eq!(
+            test_download(DlState::Receiving, Some(10_000), 354).status_text(),
+            "3.54%"
+        );
+        assert_eq!(
+            test_download(DlState::Receiving, None, 1000).status_text(),
+            "Receiving..."
+        );
     }
 }
