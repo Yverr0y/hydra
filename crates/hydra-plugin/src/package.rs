@@ -314,10 +314,10 @@ impl Package {
     }
 }
 
-/// Loads a dev-mode directory: manifest and module only, no checksums.
+/// Loads an unpacked plugin directory without checksums.
 ///
 /// # Errors
-/// The manifest or module is missing, oversized or invalid.
+/// Required files are missing or unreadable, or plugin files are oversized or invalid.
 pub fn load_dir(dir: &Path) -> Result<Package, PackageError> {
     let read = |name: &str, cap: u64| -> Result<Vec<u8>, PackageError> {
         let meta =
@@ -362,6 +362,9 @@ pub fn load_dir(dir: &Path) -> Result<Package, PackageError> {
             return refuse("native package exceeds extraction limit");
         }
         entries.insert(native.module.clone(), bytes);
+    }
+    if dir.join("LICENSE").is_file() {
+        entries.insert("LICENSE".into(), read("LICENSE", MAX_README)?);
     }
     Ok(Package {
         archive_sha256: sha256_hex(&module),
@@ -553,6 +556,27 @@ mod tests {
         let big = vec![b'x'; (MAX_README + 1) as usize];
         e.push(("README.md".into(), big));
         assert!(err(&build(&e)).contains("size cap"));
+    }
+
+    #[test]
+    fn packing_preserves_dependency_licenses_with_checksums_and_size_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let dir = directory.path();
+        std::fs::write(dir.join(MANIFEST_NAME), manifest_toml("")).unwrap();
+        std::fs::write(dir.join("plugin.wasm"), WASM).unwrap();
+        assert!(!open(&pack(dir).unwrap(), None)
+            .unwrap()
+            .entries
+            .contains_key("LICENSE"));
+        let license = b"Native engine and runtime license notices";
+        std::fs::write(dir.join("LICENSE"), license).unwrap();
+        let package = open(&pack(dir).unwrap(), None).unwrap();
+        assert_eq!(package.entries["LICENSE"], license);
+        assert!(std::str::from_utf8(&package.entries[SUMS_NAME])
+            .unwrap()
+            .contains(&format!("{}  LICENSE\n", sha256_hex(license))));
+        std::fs::write(dir.join("LICENSE"), vec![b'x'; (MAX_README + 1) as usize]).unwrap();
+        assert!(pack(dir).unwrap_err().0.contains("size cap"));
     }
 
     #[test]
