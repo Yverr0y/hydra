@@ -320,6 +320,7 @@ pub struct AddUrlState {
     pub plugin_ctl: Option<std::sync::Arc<hya_plugin::runtime::CallCtl>>,
     pub plugin_of: String,
     pub plugin_probing: bool,
+    pub loading_frame: u8,
     /// A cookie edit invalidates the session used by an in-flight inspection.
     pub plugin_probe_stale: bool,
     pub browser_cookies: Option<hya_net::CookieJar>,
@@ -2647,6 +2648,13 @@ impl App {
         crate::theme::ui_scale(self.cfg.settings.ui_scale_pct)
     }
 
+    pub(crate) fn address_loading(&self) -> bool {
+        self.add_url.plugin_probing
+            || self.add_url.stream_probing
+            || self.add_url.metalink_probing
+            || self.add_url.cookies_importing
+    }
+
     /// The size a window opens at, in interface units — the units
     /// `window::open` and `window::resize` speak.
     ///
@@ -3712,7 +3720,6 @@ impl App {
             return self.resize_open(WinKind::AddUrl);
         }
         let queue = self.cfg.queues.first().map(|queue| queue.name.clone());
-        let mut added = false;
         for entry in entries {
             if self
                 .state
@@ -3747,15 +3754,10 @@ impl App {
             );
             if let Some(item) = self.item_mut(id) {
                 item.plugin_plan = Some(pending);
+                item.state = DlState::Queued;
             }
-            added = true;
         }
         self.add_url = AddUrlState::default();
-        if added {
-            if let Some(queue) = queue {
-                self.set_queue_running(&queue, true);
-            }
-        }
         self.save_state();
         self.close_window(WinKind::AddUrl)
     }
@@ -5527,6 +5529,9 @@ impl App {
                 }
             }
             Message::AnimTick => {
+                if self.address_loading() {
+                    self.add_url.loading_frame = (self.add_url.loading_frame + 1) % 12;
+                }
                 let fast = self.animation_interval_ms() == 33;
                 let glide = if fast { 0.163 } else { 0.35 };
                 // The indeterminate scan bar: one sweep every ~1.6 s, folded
@@ -12879,6 +12884,8 @@ mod tests {
         assert_eq!(plan.preferences.audio_format.as_deref(), Some("mp3"));
         assert!(plan.preferences.playlist_ids.is_none());
         assert!(item.queue.is_some());
+        assert_eq!(item.state, DlState::Queued);
+        assert!(!app.cfg.queues[0].running);
         app.add_url.address = "https://example.com/playlist".into();
         app.add_url.plugin_of = app.add_url.address.clone();
         app.add_url.plugin_plan = Some(info);
@@ -12889,6 +12896,67 @@ mod tests {
         let _ = app.update(Message::PluginPlaylistEntry("1".into(), true));
         let _ = app.update(Message::AddUrlOk);
         assert_eq!(app.state.downloads.len(), 1);
+    }
+
+    #[test]
+    fn address_loading_animates_only_during_inspection() {
+        let mut app = App::default();
+        assert!(!app.address_loading());
+        let _ = app.update(Message::AnimTick);
+        assert_eq!(app.add_url.loading_frame, 0);
+        for kind in 0..4 {
+            app.add_url = AddUrlState::default();
+            match kind {
+                0 => app.add_url.plugin_probing = true,
+                1 => app.add_url.stream_probing = true,
+                2 => app.add_url.metalink_probing = true,
+                _ => app.add_url.cookies_importing = true,
+            }
+            assert!(app.address_loading());
+            app.add_url.loading_frame = 11;
+            let _ = app.update(Message::AnimTick);
+            assert_eq!(app.add_url.loading_frame, 0);
+            let _ = app.update(Message::AnimTick);
+            assert_eq!(app.add_url.loading_frame, 1);
+        }
+        app.add_url = AddUrlState::default();
+        assert!(!app.address_loading());
+    }
+
+    #[test]
+    fn adding_playlist_preserves_queue_state_and_existing_items() {
+        for running in [false, true] {
+            let mut app = App::default();
+            app.cfg.queues = crate::model::default_queues();
+            app.cfg.queues[0].running = running;
+            let existing = app.add_item("https://example.com/existing.zip".into(), None, None);
+            let mut info = crate::plugins::tests::plan();
+            info.plan.tracks.clear();
+            info.plan.entries = (1..=2)
+                .map(|index| hya_plugin_api::PlaylistEntry {
+                    id: index.to_string(),
+                    url: format!("https://example.com/video{index}"),
+                    title: Some(format!("Video {index}")),
+                })
+                .collect();
+            let _ = app.add_plugin_playlist(info.clone());
+            assert_eq!(app.cfg.queues[0].running, running);
+            assert_eq!(app.item(existing).unwrap().state, DlState::Paused);
+            assert_eq!(app.state.downloads.len(), 3);
+            assert!(app.state.downloads[1..]
+                .iter()
+                .all(|item| item.state == DlState::Queued));
+            assert!(app.state.downloads[1].q_order < app.state.downloads[2].q_order);
+            let _ = app.add_plugin_playlist(info);
+            assert_eq!(app.state.downloads.len(), 3);
+            assert_eq!(app.cfg.queues[0].running, running);
+            if !running {
+                let _ = app.queue_tick();
+                assert!(app.state.downloads[1..]
+                    .iter()
+                    .all(|item| item.state == DlState::Queued));
+            }
+        }
     }
 
     fn imported_cookies(header: &str, source: &str) -> crate::engine::ImportedCookies {

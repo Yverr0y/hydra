@@ -560,7 +560,8 @@ fn subscription(app: &App) -> Subscription<Message> {
         .any(|k| matches!(k, WinKind::Progress(_)));
     if !power_save
         && ((progress_open && app.state.downloads.iter().any(|d| d.state.is_active()))
-            || app.scanning())
+            || app.scanning()
+            || app.address_loading())
     {
         subs.push(
             iced::time::every(std::time::Duration::from_millis(

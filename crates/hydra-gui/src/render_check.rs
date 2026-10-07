@@ -802,6 +802,31 @@ fn add_url_keeps_long_extractor_errors_scrollable() {
 }
 
 #[test]
+fn address_loading_indicator_animates_and_clears_without_stale_pixels() {
+    for scale in [1.0, 2.0] {
+        let mut app = app_with(0);
+        app.add_url.address = "https://www.youtube.com/playlist?list=example".into();
+        app.add_url.plugin_probing = true;
+        let mut h = Harness::new(app, WinKind::AddUrl, Size::new(760.0, 260.0), scale, true);
+        h.step("address-loading", &[]);
+        let first = h.shown.clone();
+        let _ = h.app.update(crate::app::Message::AnimTick);
+        h.step("address-loading-next-frame", &[]);
+        assert_ne!(first, h.shown);
+        dump(
+            "address-loading",
+            &h.shown,
+            &h.shown,
+            physical(h.logical, h.scale),
+        );
+        h.app.add_url.plugin_probing = false;
+        h.step("address-loading-finished", &[]);
+        assert_ne!(first, h.shown);
+        h.assert_clean("address loading indicator");
+    }
+}
+
+#[test]
 fn plugin_dialog_fits_short_and_long_media_lists() {
     for (name, audio_only, entries, subtitles, long_title) in [
         ("plugin-video-no-subtitles", false, 0, 0, false),

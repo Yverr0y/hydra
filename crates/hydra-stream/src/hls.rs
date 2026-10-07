@@ -2265,6 +2265,12 @@ pub fn remux(src: &std::path::Path, dst: &std::path::Path, _kind: Segments) -> R
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mp4"));
     let mut cmd = std::process::Command::new(ff);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.args(["-y", "-loglevel", "error", "-i"])
         .arg(src)
         .args(["-c", "copy"]);
@@ -2314,6 +2320,12 @@ pub fn mux(
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mp4"));
     let mut cmd = std::process::Command::new(ff);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.args(["-y", "-loglevel", "error", "-i"])
         .arg(video)
         .arg("-i")
