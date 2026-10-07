@@ -224,6 +224,7 @@
   "Last Try Date": "마지막 시도 날짜",
   "Last try date:": "마지막 시도 날짜:",
   "Launch Hydra on startup": "시스템 시작 시 Hydra 실행",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "설치된 복사본의 시작 항목을 유지하기 위해 포터블 프로필에서는 자동 시작을 사용할 수 없습니다.",
   "Launch minimized to system tray": "시스템 트레이에 최소화된 상태로 실행",
   "Let this copy handle browser capture": "이 사본이 브라우저 캡처를 처리하도록 허용",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "폴더별 확인 프롬프트 없이 모든 폴더에 저장할 수 있습니다. + 버튼으로 Hydra를 추가하고 켠 다음 앱을 재시작하십시오(일반적인 용도에는 필요하지 않음).",

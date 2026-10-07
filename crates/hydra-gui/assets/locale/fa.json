@@ -224,6 +224,7 @@
   "Last Try Date": "تاریخ آخرین تلاش",
   "Last try date:": "تاریخ آخرین تلاش:",
   "Launch Hydra on startup": "اجرای هیدرا هنگام راه‌اندازی سیستم",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "اجرای خودکار هنگام راه‌اندازی برای پروفایل‌های قابل‌حمل در دسترس نیست تا ورودی راه‌اندازی نسخهٔ نصب‌شده حفظ شود.",
   "Launch minimized to system tray": "اجرا به‌صورت کوچک‌شده در سینی سیستم",
   "Let this copy handle browser capture": "این نسخه گرفتن دانلود از مرورگر را مدیریت کند",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "به هیدرا اجازه می‌دهد بدون پرسش برای هر پوشه در هر مسیری ذخیره کند. هیدرا را با دکمه + اضافه کنید، روشنش کنید و برنامه را دوباره اجرا کنید. برای استفاده عادی لازم نیست.",

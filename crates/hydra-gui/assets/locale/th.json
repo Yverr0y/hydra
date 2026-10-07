@@ -224,6 +224,7 @@
   "Last Try Date": "วันที่ลองล่าสุด",
   "Last try date:": "วันที่ลองล่าสุด:",
   "Launch Hydra on startup": "เปิด Hydra เมื่อเริ่มระบบ",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "การเปิดเมื่อเริ่มระบบไม่พร้อมใช้งานสำหรับโปรไฟล์แบบพกพา เพื่อรักษารายการเริ่มต้นของสำเนาที่ติดตั้งไว้",
   "Launch minimized to system tray": "เปิดโดยย่อไปยังถาดระบบ",
   "Let this copy handle browser capture": "ให้สำเนานี้จัดการการดักจับจากเบราว์เซอร์",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "ให้ Hydra บันทึกลงในโฟลเดอร์ใดก็ได้โดยไม่ต้องขอสิทธิ์ทีละโฟลเดอร์ เพิ่ม Hydra ด้วยปุ่ม + เปิดใช้งาน แล้วเปิดแอปใหม่อีกครั้ง ไม่จำเป็นสำหรับการใช้งานทั่วไป",
