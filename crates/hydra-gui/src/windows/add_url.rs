@@ -53,7 +53,7 @@ pub fn view(app: &App) -> El<'_> {
 
     // No in-window heading: the OS title bar already names the dialog, and
     // puts the Address box on the very first line.
-    let address = row![
+    let mut address = row![
         label(tr("Address")),
         crate::windows::ext_hint(
             text_input("http://", &st.address)
@@ -70,6 +70,23 @@ pub fn view(app: &App) -> El<'_> {
     .spacing(GAP)
     .height(28.0)
     .align_y(iced::Alignment::Center);
+    if app.address_loading() {
+        let angle = f32::from(st.loading_frame) * 30.0;
+        let icon = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="#b8c5d1" stroke-width="3"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="#2474b5" stroke-width="3" stroke-linecap="round" transform="rotate({angle} 12 12)"/></svg>"##
+        );
+        address = address.push(
+            container(
+                iced::widget::svg(iced::widget::svg::Handle::from_memory(icon.into_bytes()))
+                    .width(20.0)
+                    .height(20.0),
+            )
+            .width(28.0)
+            .height(28.0)
+            .center_x(28.0)
+            .center_y(28.0),
+        );
+    }
 
     let auth = check(st.use_auth, tr("Use authorization")).on_toggle(Message::AddrAuthToggled);
 

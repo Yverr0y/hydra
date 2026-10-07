@@ -28,7 +28,10 @@ pub async fn extract_audio(
     {
         return Err("audio extraction cancelled".into());
     }
-    let child = tokio::process::Command::new("ffmpeg")
+    let mut command = tokio::process::Command::new("ffmpeg");
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let child = command
         .args(["-nostdin", "-v", "error", "-y", "-i"])
         .arg(input)
         .args(["-vn", "-map", "0:a:0", "-c:a", codec])

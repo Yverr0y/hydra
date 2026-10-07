@@ -250,6 +250,12 @@ pub(crate) fn run_with_proxy(
     proxy: Option<&hya_net::Proxy>,
 ) -> Result<ExecOutput, PluginError> {
     let mut cmd = Command::new(&pin.path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        cmd.creation_flags(0x0800_0000);
+    }
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
