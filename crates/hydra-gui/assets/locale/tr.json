@@ -224,6 +224,7 @@
   "Last Try Date": "Son Deneme Tarihi",
   "Last try date:": "Son deneme tarihi:",
   "Launch Hydra on startup": "Başlangıçta Hydra'yı çalıştır",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Kurulu kopyanın başlangıç kaydını korumak için taşınabilir profillerde başlangıçta başlatma kullanılamaz.",
   "Launch minimized to system tray": "Sistem tepsisinde simge durumuna küçültülmüş olarak başlat",
   "Let this copy handle browser capture": "Tarayıcı yakalamasını bu kopya yönetsin",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Hydra'nın her klasör için onay istemeden herhangi bir klasöre kaydetmesini sağlar. Hydra'yı + düğmesiyle ekleyin, açın, ardından uygulamayı yeniden başlatın. Normal kullanım için gerekli değildir.",

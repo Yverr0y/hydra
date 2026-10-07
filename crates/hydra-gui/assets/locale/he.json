@@ -224,6 +224,7 @@
   "Last Try Date": "תאריך ניסיון אחרון",
   "Last try date:": "תאריך ניסיון אחרון:",
   "Launch Hydra on startup": "הפעל את Hydra בעת הפעלת המחשב",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "הפעלה בעת האתחול אינה זמינה לפרופילים ניידים כדי לשמור על רשומת האתחול של העותק המותקן.",
   "Launch minimized to system tray": "הפעל ממוזער למגש המערכת (Tray)",
   "Let this copy handle browser capture": "אפשר לעותק הזה לטפל בלכידה מהדפדפן",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "מאפשר ל-Hydra לשמור בכל תיקייה ללא בקשת הרשאה לכל תיקייה בנפרד. הוסף את Hydra בעזרת כפתור ה-+, הפעל את האפשרות, ואז הפעל מחדש את האפליקציה. לא חובה לשימוש רגיל.",

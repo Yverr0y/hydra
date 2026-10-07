@@ -224,6 +224,7 @@
   "Last Try Date": "Viimeisin yrityspäivä",
   "Last try date:": "Viimeisin yrityspäivä:",
   "Launch Hydra on startup": "Käynnistä Hydra järjestelmän käynnistyessä",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Käynnistys kirjautumisen yhteydessä ei ole käytettävissä siirrettävissä profiileissa, jotta asennetun kopion käynnistysmerkintä säilyy.",
   "Launch minimized to system tray": "Käynnistä pienennettynä ilmaisinalueelle",
   "Let this copy handle browser capture": "Anna tämän kopion hoitaa selainkaappaus",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Sallii Hydran tallentaa mihin tahansa kansioon ilman kansiokohtaisia kehotteita. Lisää Hydra +-painikkeella, kytke se päälle ja käynnistä sovellus uudelleen. Ei tarpeen tavallisessa käytössä.",

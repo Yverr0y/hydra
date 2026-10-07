@@ -224,6 +224,7 @@
   "Last Try Date": "Datum posledního pokusu",
   "Last try date:": "Datum posledního pokusu:",
   "Launch Hydra on startup": "Spustit Hydru při startu",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Spuštění při startu není pro přenosné profily dostupné, aby se zachovala položka po spuštění nainstalované kopie.",
   "Launch minimized to system tray": "Spustit minimalizované do systémové lišty",
   "Let this copy handle browser capture": "Nechat tuto kopii obsluhovat zachytávání z prohlížeče",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Umožňuje Hydře ukládat do libovolné složky bez dotazů pro jednotlivé složky. Přidejte Hydru tlačítkem +, zapněte ji a poté aplikaci restartujte. Pro běžné použití není nutné.",
