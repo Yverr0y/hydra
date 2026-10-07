@@ -2475,7 +2475,7 @@ async fn run_file_download(
         }
     };
 
-    let n = spec.conns.clamp(1, 32).min(conns_for_size(size));
+    let n = connection_budget(spec.conns, size);
     // A mirror list turns this into a multi-source transfer. Everything below
     // degenerates to exactly the previous single-source behaviour when
     // `spec.mirrors` is empty, which is what every non-Metalink caller passes.
@@ -4002,6 +4002,12 @@ pub fn conns_for_size(size: u64) -> usize {
     usize::try_from(size / BYTES_PER_CONN)
         .unwrap_or(usize::MAX)
         .max(1)
+}
+
+fn connection_budget(requested: usize, size: u64) -> usize {
+    requested
+        .clamp(1, crate::model::MAX_CONNECTIONS)
+        .min(conns_for_size(size))
 }
 
 /// The browser session a stream was captured with.
@@ -8569,6 +8575,24 @@ mod probe_link_tests {
         assert!(!t.headers.iter().any(|h| h.starts_with("Cookie:")));
     }
 
+    #[test]
+    fn connection_budget_supports_256_without_overpartitioning_small_files() {
+        for n in crate::model::CONNECTION_OPTIONS {
+            assert_eq!(super::connection_budget(n, u64::MAX), n);
+        }
+        for (requested, size, expected) in [
+            (256, 0, 1),
+            (256, 50 * 1024, 1),
+            (256, 256 * 256 * 1024 - 1, 255),
+            (256, 256 * 256 * 1024, 256),
+            (0, u64::MAX, 1),
+            (257, u64::MAX, 256),
+            (usize::MAX, u64::MAX, 256),
+        ] {
+            assert_eq!(super::connection_budget(requested, size), expected);
+        }
+    }
+
     /// Some origins put a byte-order mark before `#EXTM3U`; `trim_start`
     /// does not remove it, and the manifest was refused as "not a manifest".
     #[test]
@@ -8588,7 +8612,7 @@ mod probe_link_tests {
         assert_eq!(conns_for_size(512 * 1024 - 1), 1);
         assert_eq!(conns_for_size(512 * 1024), 2);
         assert_eq!(conns_for_size(8 * 256 * 1024), 8);
-        assert_eq!(8usize.clamp(1, 32).min(conns_for_size(u64::MAX)), 8);
+        assert_eq!(super::connection_budget(8, u64::MAX), 8);
     }
 }
 

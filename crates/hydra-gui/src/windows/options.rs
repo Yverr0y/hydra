@@ -671,7 +671,11 @@ impl OptionsState {
                 let server = self.conn_exc_server.trim().to_string();
                 let n: usize = self.conn_exc_n.trim().parse().unwrap_or(0);
                 if !server.is_empty() && n > 0 {
-                    upsert_exception(&mut self.draft.conn_exceptions, server, n.clamp(1, 32));
+                    upsert_exception(
+                        &mut self.draft.conn_exceptions,
+                        server,
+                        n.clamp(1, crate::model::MAX_CONNECTIONS),
+                    );
                     self.sel_exc = None;
                     self.conn_exc_server.clear();
                     self.conn_exc_n.clear();
@@ -883,7 +887,7 @@ fn list_row<'a>(
 fn conn_limits(app: &App) -> El<'_> {
     let s = &app.options.draft;
     let st = &app.options;
-    let conn_opts: Vec<usize> = vec![1, 2, 4, 8, 16, 32];
+    let conn_opts = crate::model::CONNECTION_OPTIONS.as_slice();
     let mut exc = column![].spacing(2);
     for (i, (server, n)) in s.conn_exceptions.iter().enumerate() {
         exc = exc.push(list_row(
@@ -894,13 +898,13 @@ fn conn_limits(app: &App) -> El<'_> {
             o(OptField::ExcSel(i)),
         ));
     }
-    // The Number box takes 1..=32, the range every connection count is
+    // The Number box takes 1..=256, the range every connection count is
     // clamped to; New waits until it holds one.
     let exc_n_ok = st
         .conn_exc_n
         .trim()
         .parse::<usize>()
-        .is_ok_and(|n| (1..=32).contains(&n));
+        .is_ok_and(|n| (1..=crate::model::MAX_CONNECTIONS).contains(&n));
     column![
         section(tr("Connections and Limits")),
         row![
@@ -1901,6 +1905,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn connection_limit_view_accepts_the_full_range() {
+        assert_eq!(
+            crate::model::CONNECTION_OPTIONS,
+            [1, 2, 4, 8, 16, 32, 64, 128, 256]
+        );
+        let mut app = App::default();
+        for typed in ["", "0", "1", "64", "128", "256", "257", "invalid"] {
+            app.options.conn_exc_server = "example.com".into();
+            app.options.conn_exc_n = typed.into();
+            let _ = conn_limits(&app);
+        }
+    }
+
+    #[test]
+    fn connection_settings_keep_all_choices_and_large_server_exceptions() {
+        let mut st = OptionsState::default();
+        for n in crate::model::CONNECTION_OPTIONS {
+            st.apply(OptField::DefaultConns(n));
+            st.apply(OptField::ExcServer("example.com".into()));
+            st.apply(OptField::ExcConns(n.to_string()));
+            st.apply(OptField::ExcAdd);
+            assert_eq!(st.draft.default_conns, n);
+            assert_eq!(st.draft.conn_exceptions, vec![("example.com".into(), n)]);
+        }
+        st.apply(OptField::ExcServer("example.org".into()));
+        st.apply(OptField::ExcConns("257".into()));
+        st.apply(OptField::ExcAdd);
+        assert_eq!(st.draft.conn_exceptions[1].1, 256);
     }
 
     /// An extension installed from a listing this page links to must be one
