@@ -282,6 +282,8 @@ fn boot() -> (App, Task<Message>) {
     extbus::start();
     #[cfg(target_os = "macos")]
     macos_files::install();
+    #[cfg(target_os = "macos")]
+    macos_dock::install();
     // Register the native-messaging host with every installed browser, so a
     // fresh install works without anyone running the shell script.
     nmhost::ensure_registered(cfg.settings.portable_capture);

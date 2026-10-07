@@ -1516,6 +1516,9 @@ pub fn free_queue_name(queues: &[QueueDef], base: &str) -> String {
         .expect("the naturals are never exhausted")
 }
 
+pub(crate) const MAX_CONNECTIONS: usize = 256;
+pub(crate) const CONNECTION_OPTIONS: [usize; 9] = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+
 /// What the Scheduler's two number fields accept, whether they are typed
 /// into or stepped with their arrows. The ceiling on simultaneous files is
 /// the queue's own: past a handful the connections compete for the same

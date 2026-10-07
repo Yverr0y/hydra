@@ -2824,7 +2824,11 @@ impl App {
 
     pub fn open_window(&mut self, kind: WinKind) -> Task<Message> {
         if let Some(id) = self.win_of(kind) {
-            return window::gain_focus(id);
+            return if kind == WinKind::Main {
+                Task::batch([window::minimize(id, false), window::gain_focus(id)])
+            } else {
+                window::gain_focus(id)
+            };
         }
         // One File Info dialog at a time — see close_file_info_windows for
         // why a second one strands the first. The download behind the
@@ -3036,7 +3040,7 @@ impl App {
         let host = engine::parse_url(url).map(|u| u.host).unwrap_or_default();
         exception_for(&self.cfg.settings.conn_exceptions, &host)
             .unwrap_or(self.cfg.settings.default_conns)
-            .clamp(1, 32)
+            .clamp(1, crate::model::MAX_CONNECTIONS)
     }
 
     /// Saved credentials for a URL from Options > Sites Logins.
@@ -9736,6 +9740,57 @@ mod tests {
         assert_eq!(exception_for(&list, "example.com"), Some(4));
         assert_eq!(exception_for(&list, "s7.uplod.ir"), Some(1));
         assert_eq!(exception_for(&list, "other.net"), None);
+    }
+
+    #[test]
+    fn connection_limits_preserve_large_defaults_and_server_exceptions() {
+        let mut app = App::default();
+        assert_eq!(app.conns_for("https://example.org/file"), 8);
+        for n in crate::model::CONNECTION_OPTIONS {
+            app.cfg.settings.default_conns = n;
+            assert_eq!(app.conns_for("https://example.org/file"), n);
+        }
+        app.cfg.settings.conn_exceptions = vec![("example.com".into(), 128)];
+        assert_eq!(app.conns_for("https://cdn.example.com/file"), 128);
+        assert_eq!(app.conns_for("https://example.org/file"), 256);
+        for (input, expected) in [(0, 1), (257, 256), (usize::MAX, 256)] {
+            app.cfg.settings.default_conns = input;
+            app.cfg.settings.conn_exceptions[0].1 = input;
+            assert_eq!(app.conns_for("https://example.org/file"), expected);
+            assert_eq!(app.conns_for("https://example.com/file"), expected);
+        }
+    }
+
+    #[test]
+    fn show_hydra_recreates_a_closed_main_window_without_duplicates() {
+        let mut app = App::default();
+        for _ in 0..3 {
+            let _ = app.update(Message::NativeMenu("show_main".into()));
+            let main = app.main_id.unwrap();
+            assert_eq!(app.win_of(WinKind::Main), Some(main));
+            let reveal = app.update(Message::NativeMenu("show_main".into()));
+            let actions = iced::futures::executor::block_on(async {
+                use iced::futures::StreamExt;
+                iced_runtime::task::into_stream(reveal)
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await
+            });
+            assert!(actions.iter().any(|action| matches!(
+                action,
+                iced_runtime::Action::Window(iced_runtime::window::Action::Minimize(id, false))
+                    if *id == main
+            )));
+            assert!(actions.iter().any(|action| matches!(
+                action,
+                iced_runtime::Action::Window(iced_runtime::window::Action::GainFocus(id))
+                    if *id == main
+            )));
+            assert_eq!(app.main_id, Some(main));
+            assert_eq!(app.windows.len(), 1);
+            let _ = app.update(Message::WindowClosed(main));
+            assert!(app.win_of(WinKind::Main).is_none());
+        }
     }
 
     #[test]
