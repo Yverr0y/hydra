@@ -224,6 +224,7 @@
   "Last Try Date": "上次嘗試日期",
   "Last try date:": "上次嘗試日期：",
   "Launch Hydra on startup": "開機時啟動 Hydra",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "為保留已安裝副本的啟動項目，可攜設定檔不支援開機自動啟動。",
   "Launch minimized to system tray": "啟動時最小化到系統匣",
   "Let this copy handle browser capture": "讓此副本處理瀏覽器擷取",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "允許 Hydra 儲存到任意檔案夾而無需逐個授權檔案夾。使用 + 按鈕新增 Hydra， 並將其開啟，然後重新啟動應用程式。正常使用無需此步驟。",

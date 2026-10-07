@@ -224,6 +224,7 @@
   "Last Try Date": "Date du Dernier Essai",
   "Last try date:": "Date du dernier essai :",
   "Launch Hydra on startup": "Lancer Hydra au démarrage",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Le lancement au démarrage est indisponible pour les profils portables afin de préserver l’entrée de démarrage de la copie installée.",
   "Launch minimized to system tray": "Lancer réduit dans la zone de notification",
   "Let this copy handle browser capture": "Laisser cette copie gérer la capture du navigateur",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Permet à Hydra d'enregistrer dans n'importe quel dossier sans invite par dossier. Ajoutez Hydra avec le bouton +, activez-le, puis relancez l'application. Non requis pour une utilisation normale.",

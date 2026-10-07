@@ -69,6 +69,26 @@ fn section<'a>(title: String) -> El<'a> {
         .into()
 }
 
+fn startup_checkbox<'a>(enabled: bool, portable: bool) -> iced::widget::Checkbox<'a, Message> {
+    check(enabled && !portable, tr("Launch Hydra on startup"))
+        .on_toggle_maybe((!portable).then_some(|b| o(OptField::LaunchStartup(b))))
+}
+
+fn startup_controls<'a>(enabled: bool, portable: bool) -> El<'a> {
+    let mut startup = column![hinted(
+        startup_checkbox(enabled, portable),
+        tr("Registers Hydra as a login item so downloads and queues continue after a reboot."),
+    )]
+    .spacing(4);
+    if portable {
+        startup = startup.push(
+            text(tr("Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry."))
+                .size(theme::FONT_SIZE - 1.0),
+        );
+    }
+    startup.into()
+}
+
 fn general(app: &App) -> El<'_> {
     let s = &app.options.draft;
     // Which extensions are talking to Hydra right now. A tick with nothing
@@ -124,10 +144,7 @@ fn general(app: &App) -> El<'_> {
     let mut col =
         column![
         section(tr("Browser/System Integration")),
-        hinted(
-            check(s.launch_on_startup, tr("Launch Hydra on startup")).on_toggle(|b| o(OptField::LaunchStartup(b))),
-            tr("Registers Hydra as a login item so downloads and queues continue after a reboot."),
-        ),
+        startup_controls(s.launch_on_startup, crate::model::app_dir_override().is_some()),
         hinted(
             check(s.start_in_tray, tr("Launch minimized to system tray")).on_toggle(|b| o(OptField::StartInTray(b))),
             tr("Autostart launches stay in the tray; open the window from the tray icon."),
@@ -1849,6 +1866,46 @@ pub fn view(app: &App) -> El<'_> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn startup_checkbox_only_toggles_for_the_default_profile() {
+        use iced::advanced::{layout, widget, Layout, Shell, Widget};
+        use iced::{mouse, Event, Point, Rectangle, Size};
+
+        let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(theme::FONT_SIZE),
+        ));
+        let node = layout::Node::new(Size::new(300.0, 20.0));
+        for portable in [false, true] {
+            for enabled in [false, true] {
+                let controls = startup_controls(enabled, portable);
+                let tree = widget::Tree::new(controls.as_widget());
+                assert_eq!(tree.children.len(), if portable { 2 } else { 1 });
+                let mut checkbox = startup_checkbox(enabled, portable);
+                let mut tree = widget::Tree::empty();
+                let mut messages = Vec::new();
+                checkbox.update(
+                    &mut tree,
+                    &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Layout::new(&node),
+                    mouse::Cursor::Available(Point::new(5.0, 5.0)),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &Rectangle::with_size(Size::new(300.0, 20.0)),
+                );
+                if portable {
+                    assert!(messages.is_empty());
+                } else {
+                    assert!(matches!(
+                        messages.as_slice(),
+                        [Message::OptDraft(OptField::LaunchStartup(value))] if *value == !enabled
+                    ));
+                }
+            }
+        }
+    }
 
     #[test]
     fn connection_limit_view_accepts_the_full_range() {

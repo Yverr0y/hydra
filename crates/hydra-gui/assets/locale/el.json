@@ -224,6 +224,7 @@
   "Last Try Date": "Ημερομηνία τελευταίας προσπάθειας",
   "Last try date:": "Ημερομηνία τελευταίας προσπάθειας:",
   "Launch Hydra on startup": "Εκκίνηση του Hydra κατά την εκκίνηση του συστήματος",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Η εκκίνηση με το σύστημα δεν είναι διαθέσιμη για φορητά προφίλ, ώστε να διατηρείται η καταχώριση εκκίνησης του εγκατεστημένου αντιγράφου.",
   "Launch minimized to system tray": "Εκκίνηση ελαχιστοποιημένο στην περιοχή ειδοποιήσεων",
   "Let this copy handle browser capture": "Να διαχειρίζεται αυτό το αντίγραφο τη σύλληψη από το πρόγραμμα περιήγησης",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Επιτρέπει στο Hydra να αποθηκεύει σε οποιονδήποτε φάκελο χωρίς προτροπές ανά φάκελο. Προσθέστε το Hydra με το κουμπί +, ενεργοποιήστε το και μετά επανεκκινήστε την εφαρμογή. Δεν απαιτείται για κανονική χρήση.",

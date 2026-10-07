@@ -224,6 +224,7 @@
   "Last Try Date": "अंतिम प्रयास तिथि",
   "Last try date:": "अंतिम प्रयास तिथि:",
   "Launch Hydra on startup": "स्टार्टअप पर Hydra लॉन्च करें",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "इंस्टॉल की गई कॉपी की स्टार्टअप प्रविष्टि सुरक्षित रखने के लिए पोर्टेबल प्रोफ़ाइल में स्टार्टअप पर लॉन्च उपलब्ध नहीं है।",
   "Launch minimized to system tray": "सिस्टम ट्रे में न्यूनतम करके लॉन्च करें",
   "Let this copy handle browser capture": "इस प्रति को ब्राउज़र कैप्चर संभालने दें",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "यह Hydra को बिना प्रति-फ़ोल्डर प्रॉम्प्ट के किसी भी फ़ोल्डर में सहेजने देता है। + बटन से Hydra जोड़ें, इसे चालू करें, फिर ऐप को फिर से लॉन्च करें। सामान्य उपयोग के लिए आवश्यक नहीं है।",

@@ -224,6 +224,7 @@
   "Last Try Date": "Utolsó próbálkozás dátuma",
   "Last try date:": "Utolsó próbálkozás dátuma:",
   "Launch Hydra on startup": "Hydra indítása rendszerindításkor",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Az indítás bejelentkezéskor nem érhető el hordozható profiloknál, hogy a telepített példány indítási bejegyzése megmaradjon.",
   "Launch minimized to system tray": "Indítás minimalizálva a tálcára",
   "Let this copy handle browser capture": "Ez a másolat kezelje a böngészőből érkező letöltéseket",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Lehetővé teszi, hogy a Hydra mappánkénti rákérdezés nélkül mentsen bármely mappába. Adja hozzá a Hydrát a + gombbal, kapcsolja be, majd indítsa újra az alkalmazást. Normál használathoz nem szükséges.",

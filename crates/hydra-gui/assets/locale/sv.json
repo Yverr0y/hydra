@@ -224,6 +224,7 @@
   "Last Try Date": "Senaste försöksdatum",
   "Last try date:": "Senaste försöksdatum:",
   "Launch Hydra on startup": "Starta Hydra vid systemstart",
+  "Launch on startup is unavailable for portable profiles to preserve the installed copy's startup entry.": "Start vid inloggning är inte tillgängligt för portabla profiler för att bevara den installerade kopians autostartpost.",
   "Launch minimized to system tray": "Starta minimerad till systemfältet",
   "Let this copy handle browser capture": "Låt den här kopian sköta webbläsarfångsten",
   "Lets Hydra save into any folder without per-folder prompts. Add Hydra with the + button, switch it on, then relaunch the app. Not required for normal use.": "Låter Hydra spara i valfri mapp utan att fråga för varje mapp. Lägg till Hydra med +-knappen, aktivera det och starta om appen. Krävs inte för normal användning.",
